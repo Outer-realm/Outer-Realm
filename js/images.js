@@ -75,7 +75,10 @@ function forgeTune(model, base, speedLora) {
   if (base !== 'xl') return { steps: 25, cfg: 6, sampler: 'DPM++ 2M', scheduler: 'Karras', lora: '' };
   if (/lightning|turbo|hyper|dmd|lcm/i.test(m)) return { steps: 6, cfg: 1.5, sampler: 'DPM++ SDE', scheduler: 'Karras', lora: '' };
   const big = /big.?love/i.test(m);
-  if (big || speedLora) return { steps: 6, cfg: 1.5, sampler: big ? 'LCM' : 'DPM++ SDE', scheduler: big ? 'Exponential' : 'Karras', lora: SPEED_LORA[base] };
+  /* PornMaster is a 4-step build too: it gets its LoRA whichever slot picked it, so using it as the
+     adult model does not fall back to 25 slow steps just because the main checkpoint is Lightning. */
+  const fast = big || /pornmaster/i.test(m) || !!speedLora;
+  if (fast) return { steps: 6, cfg: 1.5, sampler: big ? 'LCM' : 'DPM++ SDE', scheduler: big ? 'Exponential' : 'Karras', lora: SPEED_LORA[base] };
   return { steps: 25, cfg: 6, sampler: 'DPM++ 2M', scheduler: 'Karras', lora: '' };
 }
 function pickForgeModel(c, prompt, subject = null, wanted = '') {
@@ -83,9 +86,11 @@ function pickForgeModel(c, prompt, subject = null, wanted = '') {
   const guard = AGE.imageAllowed({ prompt, campaign: c, subject });
   const unsafe = !guard.allowed;
   const adult = normRating(c?.rating) === 'M' && !unsafe;
-  /* a model chosen on the picture wins, but never past the age guard: a minor always gets the safe model */
+  /* a model chosen on the picture wins, but never past the age guard: a minor always gets the safe model.
+     Otherwise an M-rated picture of adults uses the adult checkpoint when one is chosen. */
   const want = unsafe ? '' : String(wanted || '').trim();
-  const model = want || picCheckpoint();
+  const adultModel = unsafe ? '' : String(im.forgeModelNsfw || '').trim();
+  const model = want || (adult ? adultModel : '') || picCheckpoint();
   /* the picture's own content decides the label: a checkpoint that paints adult scenes still paints a
      safe one, and the M-rated picture is labelled (and hidden in the Gallery) as such */
   return { model, safe: !adult, kind: adult ? 'nsfw' : 'sfw' };
@@ -168,7 +173,7 @@ const IDB = {
   async get(k) { try { const db = await this.open(); return await new Promise(res => { const q = db.transaction('img').objectStore('img').get(k); q.onsuccess = () => res(q.result || null); q.onerror = () => res(null); }); } catch { return null; } },
   async put(k, v) { try { const db = await this.open(); await new Promise(res => { const t = db.transaction('img', 'readwrite'); t.objectStore('img').put(v, k); t.oncomplete = res; t.onerror = res; }); } catch {} }
 };
-function forgeJob(prompt, seed, c, neg = '', ref = null, subject = null, model = '') {
+function forgeJob(prompt, seed, c, neg = '', ref = null, subject = null, model = '', forced = '') {
   const s = S.settings.image; const pick = pickForgeModel(c, prompt, subject, model); const pk = forgePresetKey(pick.model); const P = FORGE_PRESETS[pk];
   /* Auto follows the checkpoint: Lightning and the 4-step LoRA builds paint in six steps, a standard SDXL
      build gets the usual 25. A preset picked by hand in Settings still wins. */
@@ -182,12 +187,12 @@ function forgeJob(prompt, seed, c, neg = '', ref = null, subject = null, model =
   const keyOf = (w, h) => 'k' + hashStr([prompt, seed, w, h, pk, pick.model, pick.safe, lora, s.forgeNeg, ...(neg ? [neg] : []), ...(ref ? ['ref:' + ref.key + ':' + (Number(s.refWeight) || 0.7)] : [])].join('|'));
   /* a picture already painted at the other size is reused instead of painted again */
   const alt = P.base === 'xl' ? (fast ? keyOf(FW, FH) : keyOf(small[0], small[1])) : '';
-  return { prompt, seed, W, H, P, steps, cfg, lora, sampler: T.sampler, scheduler: T.scheduler, model: pick.model, safe: pick.safe, k: keyOf(W, H), alt, neg, ref };
+  return { prompt, seed, W, H, P, steps, cfg, lora, sampler: T.sampler, scheduler: T.scheduler, model: pick.model, safe: pick.safe, k: forced || keyOf(W, H), alt, neg, ref };
 }
 const localPH = k => 'data:image/svg+xml,' + encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="3" height="2"><desc>${k}</desc></svg>`);
 const localFailURL = k => 'data:,fail-' + k;
-function localImageUrl(prompt, seed, c, neg = '', ref = null, subject = null, model = '') {
-  const job = forgeJob(prompt, seed, c, neg, ref, subject, model);
+function localImageUrl(prompt, seed, c, neg = '', ref = null, subject = null, model = '', forced = '') {
+  const job = forgeJob(prompt, seed, c, neg, ref, subject, model, forced);
   /* which game this picture belongs to, so Drive can file it in that game's own Photos folder */
   job.ctx = c && c.id ? { id: c.id, folder: c.driveFolder || '', title: c.title || 'Adventure' } : null;
   if (LOCAL.url[job.k]) return LOCAL.url[job.k];
@@ -207,7 +212,13 @@ async function pumpLocal() {
         let blob = await IDB.get(job.k);
         if (!blob) { blob = await DriveImg.get(job.k); if (blob) IDB.put(job.k, blob); }
         if (!blob && job.alt) { blob = await IDB.get(job.alt) || await DriveImg.get(job.alt); if (blob) IDB.put(job.k, blob); }
-        if (!blob) { blob = await forgeGenerate(job); await IDB.put(job.k, blob); if (S.settings.image.driveSave !== false && Drive.configured()) DriveImg.queue(job.k, job.ctx); }
+        if (!blob) {
+          blob = await forgeGenerate(job); await IDB.put(job.k, blob);
+          if (S.settings.image.driveSave !== false && Drive.configured()) {
+            DriveImg.queue(job.k, job.ctx);
+            if (String(job.ctx?.id || '').startsWith('pal_')) { if (window.palPicsChanged) window.palPicsChanged(String(job.ctx.id).slice(4)); scheduleSync(); }
+          }
+        }
         LOCAL.url[job.k] = URL.createObjectURL(blob);
       } catch (e) { LOCAL.fail[job.k] = e.message || String(e); (LOCAL.failAt = LOCAL.failAt || {})[job.k] = Date.now(); }
       LOCAL.cur = null; delete LOCAL.jobs[job.k]; swapLocal(job.k);
@@ -437,8 +448,11 @@ function forgeSettingsHTML() {
     <p class="hint">While the bridge is running it also watches Forge: if Forge crashes or is closed, the bridge starts it again and finishes the picture that was interrupted once. A notice appears here and in the app when that happens.</p>
         ${(() => { const all = [...new Set([...models, picCheckpoint(), im.forgeModelSfw, im.forgeModelNsfw].filter(Boolean))];
       const opts = all.map(m => `<option value="${esc(m)}" ${picCheckpoint() === m ? 'selected' : ''}>${esc(checkpointLabel(m))}</option>`).join('');
-      return `<label class="f"><span>Picture model — one checkpoint for every picture</span><select data-bind="image.forgeCheckpoint">${all.length ? opts : '<option value="">Tap "Find it" to load models</option>'}</select></label>
-      <p class="hint">Safe and M-rated pictures use the same checkpoint, so going from a clothed scene to an explicit one never makes Forge reload 6.5 GB. RealVisXL Lightning does both. Big Love XL and PornMaster Pro turn the 4-step speed LoRA on by themselves. A picture that involves a child or teen is always painted with adult content blocked, whatever is chosen here.</p>
+      const nsfw = String(im.forgeModelNsfw || '').trim();
+      const adultOpts = all.map(m => `<option value="${esc(m)}" ${nsfw === m ? 'selected' : ''}>${esc(checkpointLabel(m))}</option>`).join('');
+      return `<label class="f"><span>Picture model — default for safe pictures</span><select data-bind="image.forgeCheckpoint">${all.length ? opts : '<option value="">Tap "Find it" to load models</option>'}</select></label>
+      <label class="f"><span>Adult pictures use</span><select data-bind="image.forgeModelNsfw"><option value="" ${nsfw ? '' : 'selected'}>Same as the picture model (no reload)</option>${all.length ? adultOpts : ''}</select></label>
+      <p class="hint">Any loaded checkpoint can be picked in either slot: Big Love XL and PornMaster Pro are both adult-capable, and RealVisXL Lightning does both too. A different adult checkpoint makes Forge reload the model when you switch between safe and explicit pictures, so “Same” is faster. The 4-step speed LoRA is applied automatically to Big Love XL and PornMaster Pro. A picture that involves a child or teen is always painted with adult content blocked, whatever is chosen here.</p>
       ${all.length ? `<details style="margin-top:6px"><summary class="hint" style="cursor:pointer">Show file names</summary><p class="hint">${all.map(m => `${esc(checkpointLabel(m))}: ${esc(m)}`).join('<br>')}</p></details>` : ''}`; })()}
     <label class="f"><span>Quality preset</span><select data-bind="image.forgePreset"><option value="auto" ${(im.forgePreset || 'auto') === 'auto' ? 'selected' : ''}>Auto: match each model</option>${Object.entries(FORGE_PRESETS).map(([k, v]) => `<option value="${k}" ${im.forgePreset === k ? 'selected' : ''}>${v.label}</option>`).join('')}</select></label>
     <p class="hint">Auto picks the right settings for each checkpoint: 6 steps, CFG 1.5, DPM++ SDE and Karras for Lightning and the 4-step LoRA builds (LCM and Exponential for Big Love XL); 25 steps, CFG 6 and DPM++ 2M for a standard SDXL build.</p>
@@ -470,8 +484,13 @@ function modelPickHTML(key, cur = '', label = 'Model for this picture', elId = '
   if (s.mode !== 'local') return '';
   const all = [...new Set([...(S.forgeModels || []), picCheckpoint(), s.forgeModelSfw, s.forgeModelNsfw].filter(Boolean))];
   const val = String(cur || '');
-  return `<label class="f"><span>${esc(label)}</span><select id="${elId}" data-pmodel="${key}"><option value="">Usual one${picCheckpoint() ? ` (${esc(checkpointLabel(picCheckpoint()))})` : ''}</option>${all.map(m => `<option value="${esc(m)}" ${m === val ? 'selected' : ''}>${esc(checkpointLabel(m))}</option>`).join('')}</select></label>
-    ${all.length ? '<p class="hint" style="margin-top:-4px">If the picture involves a minor, the safe model is used whichever one you pick.</p>' : '<p class="hint">Tap "Find it" in Settings → Images to load the models from your PC.</p>'}`;
+  const adult = String(s.forgeModelNsfw || '').trim();
+  const short = m => checkpointLabel(m).split(' — ')[0];
+  const usual = picCheckpoint() ? (adult && adult !== picCheckpoint()
+    ? `Usual one (${short(picCheckpoint())} safe · ${short(adult)} adult)`
+    : `Usual one (${short(picCheckpoint())})`) : 'Usual one';
+  return `<label class="f"><span>${esc(label)}</span><select id="${elId}" data-pmodel="${key}"><option value="">${esc(usual)}</option>${all.map(m => `<option value="${esc(m)}" ${m === val ? 'selected' : ''}>${esc(checkpointLabel(m))}</option>`).join('')}</select></label>
+    ${all.length ? '<p class="hint" style="margin-top:-4px">Safe and adult pictures use their own usual models; every loaded model is available here. If the picture involves a minor, the safe model is used whichever one you pick.</p>' : '<p class="hint">Tap "Find it" in Settings → Images to load the models from your PC.</p>'}`;
 }
 
 /* ask for the prompt (and which model) before painting: scene illustrations, portraits, persona photos */
@@ -549,6 +568,8 @@ function askPicNsfw(then, what = 'this picture', pre = false) {
 
 /* the store key a picture is painted under on this device: the same key imageUrl/forgeJob use */
 function localKeyFor(img, c, subject = null, ref = null) {
+  /* a picture keeps the key it was created with, even if a model or reference setting changes later */
+  if (img?.k) return img.k;
   const s = S.settings.image;
   const style = ((c && c.artStyle) || s.style || '').trim();
   const prompt = (img.prompt + (style ? ', ' + style : '')).replace(/\s+/g, ' ').slice(0, 3600);
@@ -563,7 +584,7 @@ function imageUrl(img, c) {
   /* who this picture is of, when the app knows: a companion, the player, a party member or an NPC */
   const subject = img.subj && typeof subjChar === 'function' ? subjChar(img.subj) : null;
   /* the local painter adds the standing extra itself, so the picture store key stays tied to the picture's own prompt */
-  if (s.mode === 'local') return localImageUrl(prompt, img.seed || 1, c, neg, s.refPhotos !== false && img.subj && typeof subjRef === 'function' ? subjRef(img.subj) : null, subject, img.model);
+  if (s.mode === 'local') return localImageUrl(prompt, img.seed || 1, c, neg, s.refPhotos !== false && img.subj && typeof subjRef === 'function' ? subjRef(img.subj) : null, subject, img.model, img.k);
   /* online services take the standing additions in the request itself */
   const fullPrompt = img.prompt && picLook() ? `${prompt}, ${picLook()}`.slice(0, 2000) : prompt;
   const fullNeg = [neg, picAvoid()].filter(Boolean).join(', ').slice(0, 700);
@@ -705,7 +726,7 @@ const Drive = {
 };
 /* ---------- pictures painted on the PC are kept in Drive → "Ironquill pictures", so every device shares them ---------- */
 const DriveImg = {
-  folder: null, index: null, loading: null, busy: false,
+  folder: null, index: null, loading: null, busy: false, sealing: false,
   ready() { return S.settings.image.driveSave !== false && Drive.configured() && Drive.valid(); },
   async ensure() {
     if (this.index) return;
@@ -725,9 +746,36 @@ const DriveImg = {
       let id = this.index[k];
       if (!id) { await this.scanPhotos(); id = this.index[k]; }   /* not in the old shared folder: look in the games' and companions' own Photos folders */
       if (!id) return null;
-      const r = await Drive.api(`https://www.googleapis.com/drive/v3/files/${id}?alt=media&supportsAllDrives=true`); const b = await r.blob(); return b.size ? b : null;
+      const r = await Drive.api(`https://www.googleapis.com/drive/v3/files/${id}?alt=media&supportsAllDrives=true`); const b = await r.blob(); if (!b.size) return null;
+      const plain = !(await sealedBlobIs(b));
+      const out = await Sealed.openBlob(b);
+      if (out && plain && Sealed.ready()) this.reseal(id, b);   /* pictures saved before sealing become sealed when first opened */
+      return out;
     }
     catch (e) { console.warn('Drive picture read failed', e); return null; }
+  },
+  /* the folder for one companion (Companions/<name>), found by its hidden iqPal tag */
+  async companionFolder(palId) {
+    this.palDirs = this.palDirs || {};
+    if (Object.prototype.hasOwnProperty.call(this.palDirs, palId)) return this.palDirs[palId];
+    const root = Drive.root();
+    const comps = (await Drive.list(`name='Companions' and '${root}' in parents and mimeType='${FOLDER_MIME}' and trashed=false`))[0];
+    if (!comps) return null;
+    const folders = await Drive.list(`'${comps.id}' in parents and mimeType='${FOLDER_MIME}' and trashed=false`);
+    const id = (folders.find(f => f.appProperties?.iqPal === palId) || {}).id || null;
+    if (id) this.palDirs[palId] = id;   /* a folder made later by sync is looked up again, not cached as missing */
+    return id;
+  },
+  /* a companion portrait or one chat photo, by its stable file name. This is the fallback for pictures
+     written before the hash-key lookup existed, or when this device computes a different key. */
+  async getCompanionFile(palId, name) {
+    if (!this.ready()) return null;
+    try {
+      const dir = await this.companionFolder(palId); if (!dir) return null;
+      const id = await Drive.fileId(dir, name); if (!id) return null;
+      const r = await Drive.api(`https://www.googleapis.com/drive/v3/files/${id}?alt=media&supportsAllDrives=true`);
+      const b = await r.blob(); return b.size ? await Sealed.openBlob(b) : null;
+    } catch (e) { return null; }
   },
   /* the one folder every game's pictures live in: <game folder>/Photos */
   async photosOf(parent, key) {
@@ -761,7 +809,65 @@ const DriveImg = {
     await this.ensure(); if (this.index[k]) return;
     let dir = this.folder;
     if (ctx && ctx.folder) { try { dir = await this.photosOf(ctx.folder, 'camp:' + (ctx.id || ctx.folder)); } catch (e) { console.warn('Game Photos folder', e); } }
-    this.index[k] = await Drive.putFile(dir, k + '.jpg', blob, 'image/jpeg');
+    const body = await Sealed.blobFor(blob);
+    this.index[k] = await Drive.putFile(dir, k + '.jpg', body, body.type || 'image/jpeg');
+  },
+  /* replace a plain picture with its sealed bytes, keeping the same file id and name */
+  async reseal(id, blob) {
+    try {
+      const body = await Sealed.blobFor(blob); if (body === blob) return;
+      await Drive.api(`https://www.googleapis.com/upload/drive/v3/files/${id}?uploadType=media&supportsAllDrives=true`, { method:'PATCH', headers:{ 'Content-Type': body.type || 'application/octet-stream' }, body });
+    } catch (e) { console.warn('Picture could not be sealed', e); }
+  },
+  /* One-time sweep: seal every picture already in Drive, in place. Covers the shared "Ironquill pictures"
+     folder, each game's Photos, companion portraits and Photos, and persona portraits. Returns counts so
+     the settings can say exactly what happened. */
+  async sealAll(progress) {
+    if (this.sealing) return null;
+    if (!Drive.configured() || !Drive.valid()) throw new Error('Connect Google Drive first.');
+    if (!Sealed.ready() && Vault.get()) { try { await Vault.pull({ quiet: true }); } catch {} }
+    if (!Sealed.ready()) throw new Error('Unlock the vault first — pictures are sealed with its key.');
+    this.sealing = true;
+    const say = t => { try { progress && progress(t); } catch {} };
+    const files = new Map();
+    const add = list => arr(list).forEach(f => {
+      if (f && f.id && f.mimeType !== FOLDER_MIME && /\.(jpe?g|png|webp|gif)$/i.test(String(f.name || ''))) files.set(f.id, f);
+    });
+    const child = async (parent, name) => (await Drive.list(`name='${qs(name)}' and '${parent}' in parents and mimeType='${FOLDER_MIME}' and trashed=false`))[0] || null;
+    try {
+      await this.ensure();
+      add(await Drive.list(`'${this.folder}' in parents and trashed=false`));
+      const root = Drive.root();
+      const games = await Drive.folder(root, 'Games', { iqGames: '1' });
+      for (const g of await Drive.list(`'${games}' in parents and mimeType='${FOLDER_MIME}' and trashed=false`)) {
+        const p = await child(g.id, 'Photos'); if (p) add(await Drive.list(`'${p.id}' in parents and trashed=false`));
+      }
+      for (const top of ['Companions', 'Personas']) {
+        const box = await child(root, top); if (!box) continue;
+        for (const item of await Drive.list(`'${box.id}' in parents and mimeType='${FOLDER_MIME}' and trashed=false`)) {
+          add(await Drive.list(`'${item.id}' in parents and trashed=false`));
+          const p = await child(item.id, 'Photos'); if (p) add(await Drive.list(`'${p.id}' in parents and trashed=false`));
+        }
+      }
+      const list = [...files.values()]; const total = list.length;
+      let i = 0, sealed = 0, already = 0; const failed = [];
+      for (const f of list) {
+        i++; say(`Checking picture ${i} of ${total}…`);
+        try {
+          const r = await Drive.api(`https://www.googleapis.com/drive/v3/files/${f.id}?alt=media&supportsAllDrives=true`);
+          const b = await r.blob(); if (!b.size) throw new Error('empty file');
+          if (await sealedBlobIs(b)) {
+            if (!(await Sealed.openBlob(b))) throw new Error('sealed with a key this vault does not hold');
+            already++; continue;
+          }
+          const body = await Sealed.blobFor(b);
+          await Drive.api(`https://www.googleapis.com/upload/drive/v3/files/${f.id}?uploadType=media&supportsAllDrives=true`, { method:'PATCH', headers:{ 'Content-Type': body.type || 'application/octet-stream' }, body });
+          sealed++; say(`Sealed ${sealed + already} of ${total}: ${f.name}`);
+        } catch (e) { failed.push(`${f.name}: ${e.message || e}`); console.warn('Picture seal failed', f.name, e); }
+      }
+      const msg = `Checked ${total} picture${total === 1 ? '' : 's'}: ${sealed} newly sealed, ${already} already sealed${failed.length ? `, ${failed.length} failed` : ''}.`;
+      return { total, sealed, already, failed, msg };
+    } finally { this.sealing = false; }
   },
   /* remember what still needs uploading (the picture itself waits in this device's storage) */
   pending() { return arr(LS.get('iq.imgPending', [])); },
@@ -802,6 +908,24 @@ async function pullKeysFromDrive(root) {
 }
 /* the keys always leave this device sealed: see js/vault.js */
 async function saveKeysToDrive() { await Vault.push(); }
+/* one-time picture sweep from Settings → Google Drive */
+async function sealPicturesFromUI() {
+  if (DriveImg.sealing) return toast('Pictures are already being sealed.');
+  if (!Drive.valid()) return toast('Connect Google Drive first, then run this.');
+  if (!Sealed.ready() && Vault.get()) { try { await Vault.pull({ quiet: true }); } catch {} }
+  if (!Sealed.ready()) { toast('Unlock the vault first: type its passphrase and tap Unlock & load keys.', 7000); $('#vaultPass')?.focus(); return; }
+  if (!confirm('Encrypt every picture already in Drive?\n\nScene images, game Photos, companion portraits and chat photos are rewritten in place. Other devices will need the vault passphrase to view them, and older versions of the app will no longer show them.')) return;
+  S.picSealStatus = 'Looking through your Drive picture folders…'; renderModal();
+  try {
+    const r = await DriveImg.sealAll(t => { S.picSealStatus = t; const el = $('#picSealStatus'); if (el) el.textContent = t; });
+    S.picSealStatus = r.msg + (r.failed.length ? ' Failed: ' + r.failed.slice(0, 4).join(' · ') + (r.failed.length > 4 ? ' …' : '') : '');
+    renderModal();
+    toast(r.failed.length ? `Sealed ${r.sealed}; ${r.failed.length} picture${r.failed.length > 1 ? 's' : ''} could not be sealed.` : `Pictures sealed: ${r.sealed} new, ${r.already} already sealed.`, 9000);
+  } catch (e) {
+    S.picSealStatus = 'Stopped: ' + (e.message || e); renderModal();
+    toast('Could not seal pictures: ' + (e.message || e), 8000);
+  }
+}
 
 const safeName = s => String(s || 'Adventure').replace(/[\\/:*?"<>|#%]/g, '').trim().slice(0, 80) || 'Adventure';
 function characterMD(c) {

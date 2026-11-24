@@ -177,6 +177,7 @@ document.addEventListener('click', e => {
     case 'vaultload': Vault.openFromUI(); break;
     case 'vaultforget': Vault.forget(); toast('Passphrase forgotten on this device. The vault in Drive stays encrypted.'); renderModal(); break;
     case 'vaultplain': if (confirm('Move the old unencrypted ironquill-keys file in your Drive folder to the bin? Your keys stay in this browser and in the encrypted vault.')) removePlainKeysFromDrive().then(() => renderModal()); break;
+    case 'picseal': sealPicturesFromUI(); break;
     case 'keymanual': { const p = $('#manPreset').value; const addr = $('#manAddr').value.trim(); const key = $('#manKey').value.trim();
       if (PRESETS[p].key && !key) { toast('That provider needs a key.'); break; }
       if (p === 'custom' && !addr) { toast('Custom needs an address.'); break; }
@@ -261,10 +262,15 @@ document.addEventListener('input', e => {
     const v = el.type === 'checkbox' ? el.checked : el.type === 'number' || el.type === 'range' ? Number(el.value) : el.value;
     setPath(S.settings, el.dataset.bind, v); if (el.dataset.bind === 'ai.helperModel') S.settings.ai.helperAuto = v ? '' : 'off';
     /* a new checkpoint brings its own speed setting: the 4-step LoRA for the backup builds, off for Lightning */
-    if (el.dataset.bind === 'image.forgeCheckpoint') { S.settings.image.speedLora = /big.?love|pornmaster/i.test(v); S.settings.image.forgeModelSfw = v; }
+    if (el.dataset.bind === 'image.forgeCheckpoint') {
+      const old = S.settings.image.forgeModelSfw, nsfw = S.settings.image.forgeModelNsfw;
+      S.settings.image.speedLora = /big.?love|pornmaster/i.test(v); S.settings.image.forgeModelSfw = v;
+      /* an adult slot left following the old main model follows the new one; a deliberate different pick stays */
+      if (!nsfw || nsfw === old) S.settings.image.forgeModelNsfw = '';
+    }
     saveSettings();
     if (['drive.idleSync', 'drive.autoSync'].includes(el.dataset.bind)) armIdleSync();   /* take effect straight away */
-    if (el.dataset.bind === 'drive.folder') { Drive.files = {}; DriveImg.index = null; DriveImg.folder = null; DriveImg.loading = null; DriveImg.dirs = {}; }   /* forget ids cached from the old folder */
+    if (el.dataset.bind === 'drive.folder') { Drive.files = {}; DriveImg.index = null; DriveImg.folder = null; DriveImg.loading = null; DriveImg.dirs = {}; DriveImg.palDirs = {}; }   /* forget ids cached from the old folder */
     if (el.dataset.bind === 'image.refWeight') { const sv = el.closest('label')?.querySelector('.sval'); if (sv) sv.textContent = Math.round(v * 100) + '%'; }
     if (/^ui\.(music|amb|voiceVol|narr)/.test(el.dataset.bind)) { musicScene(cur()); musicLevel(); voiceLevel(); const sv = el.closest('label')?.querySelector('.sval'); if (sv) sv.textContent = el.dataset.bind === 'ui.narr' ? v + 'px' : pct(v); }
     if (el.tagName === 'SELECT' || el.dataset.bind === 'drive.folder') { if (el.tagName === 'SELECT') renderModal(); else { const h = el.closest('label')?.nextElementSibling; if (h && h.classList.contains('hint')) { const fid = folderIdFrom(el.value); h.innerHTML = fid ? `Folder ID: <code>${esc(fid)}</code>` : '<span style="color:var(--red)">Paste a Google Drive folder link.</span>'; } } }

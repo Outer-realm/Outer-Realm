@@ -407,6 +407,10 @@ function settingsHTML() {
       ${bindCheck('drive.vault', 'Keep my keys in Drive: load them at every sync, and re-save the vault a few seconds after a key changes')}
       <div class="row" style="margin-top:10px"><button class="btn gold" data-act="vaultsave">${icon('cloud')} Save keys to the vault</button><button class="btn" data-act="vaultload">Unlock &amp; load keys</button></div>
       <div class="row" style="margin-top:8px">${Vault.stored() ? '<button class="btn sm ghost" data-act="vaultforget">Forget passphrase here</button>' : ''}<button class="btn sm ghost" data-act="vaultplain">Delete the old unencrypted keys file</button></div>
+      <div class="sect" style="font-size:20px">Pictures in Drive</div>
+      <p class="hint">Scene images, game Photos, companion portraits and chat photos are sealed with your vault key before upload. Pictures written by an older version stay readable until they are opened or sealed here.</p>
+      <div class="row"><button class="btn" data-act="picseal" ${Drive.valid() ? '' : 'disabled'}>${icon('shield')} Encrypt pictures already in Drive</button></div>
+      <p class="hint" id="picSealStatus">${esc(S.picSealStatus || '')}</p>
       <div class="row" style="margin-top:16px"><button class="btn gold" data-act="sync">${icon('cloud')} ${Drive.valid() ? 'Sync now' : 'Connect & sync'}</button>${Drive.valid() || LS.get('iq.driveok', false) ? `<button class="btn ghost" data-act="drivedisc">Disconnect</button>` : ''}</div>
       <p class="hint" id="driveStatus">${esc(S.syncStatus || (Drive.valid() ? 'Connected.' : 'Not connected.'))}</p>
       ${Drive.valid() && S.driveAs ? `<p class="hint">Signed in as <b>${esc(S.driveAs)}</b>.</p>` : ''}`;
@@ -487,11 +491,33 @@ const OLLAMA_TAGS = [
   [/llama|mistral|nemo|phi/i, ['Story']]
 ];
 const modelTags = id => (OLLAMA_TAGS.find(([re]) => re.test(String(id || ''))) || [null, []])[1];
+/* One line per known local model: what it actually gives the chat, and whether it will write adult scenes.
+   Same first-match rule as the tags, so a model the app does not know simply gets no line. */
+const MODEL_NOTES = [
+  [/wayfarer/i, 'Best scene writer here: second-person adventure prose, uncensored. Slower on 8 GB.'],
+  [/qwen3\.5-abliterated|qwen3-abliterated/i, 'Uncensored all-rounder: strong NSFW, follows the rules well, quicker than Wayfarer.'],
+  [/gemma3-abliterated/i, 'Uncensored Gemma: warm, natural companion chat and adult scenes.'],
+  [/^dolphin/i, 'Quick and uncensored; the most reliable at dice, records and JSON. Fine roleplay.'],
+  [/coder|code[-_]?qwen|starcoder/i, 'Coding model: use it as the helper, not for story or chat.'],
+  [/gemma4:e2b|gemma4:e4b/i, 'Small Gemma 4: warm SFW narration and chat, still quick on a 6 GB card.'],
+  [/gemma4/i, 'Modern Gemma: polished SFW prose and good rule-following; may refuse explicit scenes.'],
+  [/gemma3:4b/i, 'Tiny and quick: friendly SFW chat, simple prose.'],
+  [/^gemma3/i, 'Older Gemma: dependable SFW narration, less vivid than Gemma 4.'],
+  [/qwen3\.5:4b/i, 'Fastest replies: crisp SFW chat; simpler prose, forgets side characters sooner.'],
+  [/qwen3\.5:9b|qwen3:8b|qwen3:14b/i, 'Strong general SFW model: good rules and prose, but refuses explicit scenes.'],
+  [/qwen3\.5/i, 'Large SFW storyteller: richer prose, needs more graphics memory.'],
+  [/hermes/i, 'Uncensored instruct model: steady roleplay, fewer refusals.'],
+  [/mistral-nemo|nemo/i, 'Long-context SFW storyteller: good continuity, plain prose.'],
+  [/llama/i, 'General SFW model: dependable, less atmospheric.'],
+  [/phi/i, 'Small and fast; factual answers, thin story prose.']
+];
+const modelNote = id => (MODEL_NOTES.find(([re]) => re.test(String(id || ''))) || [null, ''])[1];
 function modelListHTML(c) {
   const q = String(S.modelQ || '').toLowerCase().trim(); const g = modelGroups(c);
   const f = list => list.filter(id => !q || id.toLowerCase().includes(q));
   const tags = id => c.preset === 'ollama' ? modelTags(id) : [];
-  const row = (id, good) => `<button class="mrow ${good ? 'good' : ''} ${id === c.model ? 'cur' : ''}" data-act="modelset" data-id="${c.id}" data-m="${esc(id)}">${good ? '★ ' : ''}${esc(id)}${tags(id).length ? `<span class="mtags">${tags(id).map(t => `<i class="mtag">${esc(t)}</i>`).join('')}</span>` : ''}${g.free(id) ? '<small>free</small>' : ''}${id === c.model ? '<small>in use</small>' : ''}</button>`;
+  const note = id => c.preset === 'ollama' ? modelNote(id) : '';
+  const row = (id, good) => `<button class="mrow ${good ? 'good' : ''} ${id === c.model ? 'cur' : ''}" data-act="modelset" data-id="${c.id}" data-m="${esc(id)}">${good ? '★ ' : ''}${esc(id)}${tags(id).length ? `<span class="mtags">${tags(id).map(t => `<i class="mtag">${esc(t)}</i>`).join('')}</span>` : ''}${g.free(id) ? '<small>free</small>' : ''}${id === c.model ? '<small>in use</small>' : ''}${note(id) ? `<span class="mdesc">${esc(note(id))}</span>` : ''}</button>`;
   const sec = (label, list, good) => f(list).length ? `<div class="mgrp">${label}</div>${f(list).map(id => row(id, good)).join('')}` : '';
   const all = [...g.rec, ...g.story, ...g.rest];
   const body = (c.modelsLoading && !all.length ? '<p class="hint">Loading models…</p>' : '')
@@ -506,7 +532,7 @@ function modelSelectHTML(c) {
   const open = S.modelPick === c.id; const good = modelGroups(c);
   const isGood = c.model && (good.rec.includes(c.model) || good.story.includes(c.model));
   return `<button class="mpick grow ${isGood ? 'good' : ''}" data-act="modelpick" data-id="${c.id}">${c.model ? `${isGood ? '★ ' : ''}${esc(c.model)}` : 'Choose a model…'}<span class="mchev">${open ? '▲' : '▼'}</span></button>`
-    + (open ? `</div><div class="mpanel"><input id="modelQ" data-cid="${c.id}" placeholder="Search, or type any model name…" value="${esc(S.modelQ || '')}" autocomplete="off"><div class="mlist" id="mlist">${modelListHTML(c)}</div></div><div class="row" style="margin-top:6px">` : '');
+    + (open ? `</div><div class="mpanel"><input id="modelQ" data-cid="${c.id}" placeholder="Search, or type any model name…" value="${esc(S.modelQ || '')}" autocomplete="off">${c.preset === 'ollama' ? `<p class="hint mlegend"><b>Story</b> prose &amp; pacing · <b>D&amp;D</b> rules and dice · <b>Companion</b> everyday chat · <b>NSFW</b> uncensored · <b>SFW</b> may refuse explicit scenes</p>` : ''}<div class="mlist" id="mlist">${modelListHTML(c)}</div></div><div class="row" style="margin-top:6px">` : '');
 }
 async function loadConnModels(c) {
   c.modelsLoading = true;

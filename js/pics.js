@@ -21,7 +21,7 @@ function lbImage(ref) {
 }
 function lbSrc(ref) {
   const img = lbImage(ref); if (!img) return '';
-  if (ref.t === 'pal') { const ch = PALS.chats[ref.chat]; const m = ch.messages.find(x => x.id === ref.msg); return palImg(img, PALS.pals[m.who] || palsOf(ch)[0], ch); }
+  if (ref.t === 'pal') { const ch = PALS.chats[ref.chat]; const m = ch.messages.find(x => x.id === ref.msg); return palImg(img, PALS.pals[m.who] || palsOf(ch)[0], ch, m); }
   if (ref.t === 'port') return palImg(img, PALS.pals[ref.pal]);
   return imageUrl(img, S.campaigns[ref.id]);
 }
@@ -304,7 +304,7 @@ window.palImgFail = el => { const ph = el.previousElementSibling; if (!ph) retur
 
 /* ---------- a photo inside a companion chat ---------- */
 function palPhotoHTML(ch, m, p) {
-  const src = palImg(m.image, p, ch); if (!src) return '';
+  const src = palImg(m.image, p, ch, m); if (!src) return '';
   return `<div class="palphotow"><div class="ph"><span class="spin"></span><span class="imgprog">Painting…</span><button class="link" data-act="palpiccancel" data-id="${m.id}">Cancel</button></div><img class="palphoto" data-act="palzoom" data-id="${m.id}" alt="photo" src="${esc(src)}" onload="if(this.src.indexOf('data:image/svg')){this.classList.add('ld');this.previousElementSibling.style.display='none'}" onerror="palImgFail(this)"></div>`;
 }
 /* ---------- the player, in their own words ---------- */
@@ -405,7 +405,7 @@ async function palPicture(ch, o = {}) {
   /* an 18+ chat painted with the safe model comes back clothed and airbrushed: say it out loud instead of guessing */
   if (adult && S.settings.image.mode === 'local' && !S.settings.image.forgeCheckpoint && !S.settings.image.forgeModelSfw && !S.palPicWarned) {
     S.palPicWarned = true;
-    toast('This chat is 18+, but no picture model is chosen in Settings → Images. Tap "Find it & load models" and pick the all-in-one checkpoint (RealVisXL Lightning) so adult pictures come out right.', 9000);
+    toast('This chat is 18+, but no picture model is chosen in Settings → Images. Tap "Find it & load models" and pick a picture model, then choose an adult model such as PornMaster Pro or Big Love XL in "Adult pictures use".', 9000);
   }
   const user = String(o.user || '').replace(/\s+/g, ' ').trim().slice(0, 500); const neg = String(o.neg ?? ch.picNeg ?? '').replace(/\s+/g, ' ').trim().slice(0, 400);
   const me = personaOf(ch); const R = persRef(me);
@@ -464,6 +464,13 @@ Reply with JSON only: {"prompt":"","outfit":"","intimate":false,"you_in_frame":f
   const prompt = o.exact && userPic ? userPic : [selfie ? 'selfie, phone camera photo' : subjects.length > 1 ? `photo of ${subjects.length} people together` : 'candid photo', ...looks, wearing && subjects.length === 1 ? `wearing ${wearing}` : adult && stark ? 'nude, bare skin' : '', dressFb, desc, real, userPic && !desc.toLowerCase().includes(userPic.toLowerCase().slice(0, 24)) ? userPic : '', j?.you_in_frame === true && meLook ? `with ${me.sex === 'female' ? 'a woman' : 'a man'}: ${meLook.slice(0, 160)}` : ''].map(s => String(s || '').trim()).filter(Boolean).join(', ').replace(/\s+/g, ' ').slice(0, 3400);
   delete msg.picBusy;
   msg.image = { prompt, seed: d(999999), neg, kind: selfie ? 'selfie' : 'scene', ...(o.model ? { model: o.model } : {}), ...(user ? { user } : {}), ...(subjects.length === 1 && wearing ? { fit: wearing } : {}), ...(subjects.length === 1 && !o.exact ? { subj: { t: 'pal', id: p.id }, pose: [desc, userPic].filter(Boolean).join(', ').slice(0, 500) } : {}) };
+  /* remember the store/Drive key: reopening this chat uses it instead of repainting the same picture */
+  try {
+    const pc = palCtx(p, ch);
+    const ps2 = msg.image.subj && typeof subjChar === 'function' ? subjChar(msg.image.subj) : null;
+    const pr = S.settings.image.refPhotos !== false && msg.image.subj && typeof subjRef === 'function' ? subjRef(msg.image.subj) : null;
+    msg.image.k = localKeyFor(msg.image, pc, ps2, pr);
+  } catch (e) { console.warn('Picture key', e); }
   msg.text = selfie ? String(j?.caption || '').replace(/^["“]|["”]$/g, '').trim().slice(0, 300) || '*sends a selfie*' : '';
   if (o.saveNeg) ch.picNeg = neg;
   if (S.palBusy?.msg === msg.id) S.palBusy = null; if (S.abort?.signal === signal) S.abort = null;

@@ -142,7 +142,32 @@ function palCtx(p, chat) {
   });
   return ctx;
 }
-const palImg = (img, p, chat) => !img ? '' : img.data ? img.data : S.settings.image.mode !== 'off' && p ? imageUrl(img, palCtx(p, chat)) : '';
+const palPicLoading = new Set(), palPicMissing = new Set(), palPicChecked = new Set();
+const palImg = (img, p, chat, m) => {
+  if (!img) return '';
+  if (img.data) return img.data;
+  if (S.settings.image.mode === 'off' || !p) return '';
+  const c = palCtx(p, chat);
+  if (S.settings.image.mode !== 'local') return imageUrl(img, c);
+  /* the lookup-and-redraw path is for the open chat; other screens keep the immediate painter URL */
+  if (!m && S.view !== 'palchat') return imageUrl(img, c);
+  const subject = img.subj && typeof subjChar === 'function' ? subjChar(img.subj) : null;
+  const ref = S.settings.image.refPhotos !== false && img.subj && typeof subjRef === 'function' ? subjRef(img.subj) : null;
+  const k = localKeyFor(img, c, subject, ref);
+  if (palPicMissing.has(k) || palPicChecked.has(k)) return imageUrl(img, c);
+  if (!palPicLoading.has(k)) { palPicLoading.add(k); palHydrate(img, c, k, p, m); }
+  return localPH(k);
+};
+/* Before Forge paints, look for this exact picture in this device's store, in Drive under its hash, or
+   in the companion's folder under the name syncPals gives chat photos and portraits. */
+async function palHydrate(img, c, k, p, m) {
+  try {
+    let b = await IDB.get(k) || await DriveImg.get(k);
+    if (!b && p?.id) b = await DriveImg.getCompanionFile(p.id, m?.id ? 'photo-' + m.id + '.jpg' : 'portrait.jpg');
+    if (b) { await IDB.put(k, b); palPicLoading.delete(k); palPicChecked.add(k); palRedraw(); return; }
+  } catch (e) { console.warn('Picture lookup', e); }
+  palPicLoading.delete(k); palPicMissing.add(k); palRedraw();
+}
 const palAvatar = (p, cls = 'pav') => { const src = p?.portrait ? palImg(p.portrait, p) : ''; return src ? `<img class="${cls}" src="${esc(src)}" alt="" loading="lazy" onerror="this.style.display='none'">` : `<span class="${cls} pavi" style="background:${palColor(p)}">${initial(p?.name)}</span>`; };
 const palColor = p => `hsl(${hashNum(p?.name || '') % 360} 45% 38%)`;
 
@@ -164,6 +189,18 @@ async function palPicBlob(p) {
 }
 /* one attempt per picture per session: a picture painted on another device is not looked for on every sync */
 const picTried = new Set();
+/* a newly painted chat picture makes the next sync check the Photos folder again */
+window.palPicsChanged = id => { picTried.delete('phscan:' + id); };
+/* bytes of a painted chat picture: this device's store first, then Drive, with the painter's key */
+async function palChatBlob(img, p, chat) {
+  try {
+    const s = S.settings.image;
+    const subject = img?.subj && typeof subjChar === 'function' ? subjChar(img.subj) : null;
+    const ref = s.refPhotos !== false && img?.subj && typeof subjRef === 'function' ? subjRef(img.subj) : null;
+    const k = localKeyFor(img, palCtx(p, chat), subject, ref);
+    return (await IDB.get(k)) || (await DriveImg.get(k)) || null;
+  } catch (e) { console.warn('Chat picture', e); return null; }
+}
 /* the painted picture for a persona's photo, as bytes ready for the same upload path uploaded photos use */
 async function personaPicBlob(img) {
   try { const k = localKeyFor(img, null); const b = await IDB.get(k) || await DriveImg.get(k); return b || null; }
@@ -329,13 +366,26 @@ async function syncPals(root) {
       }
       if (!port && p.portrait && !f?.appProperties?.iqPortrait) picTried.add(picMark);
       if (needsData) await Drive.put(f.id, 'companion.json', await Sealed.file('companion.json', JSON.stringify({ app: APP, savedAt: Date.now(), pal: p, chats })), 'application/json');
-      if (port) await Drive.putFile(f.id, 'portrait.jpg', port, 'image/jpeg');
-      if (needsData) {
-        const photos = chats.some(ch => arr(ch.messages).some(m => m && m.image && m.image.data)) ? await Drive.folder(f.id, 'Photos') : null;
-        for (const ch of chats) for (const m of arr(ch.messages)) {
-          const photo = photos && m && m.image && dataUrlBlob(m.image.data);
-          if (photo) await Drive.putFile(photos, 'photo-' + String(m.id) + '.jpg', photo, 'image/jpeg');
-        }
+      if (port) { const body = await Sealed.blobFor(port); await Drive.putFile(f.id, 'portrait.jpg', body, body.type || 'image/jpeg'); }
+      /* Every chat picture gets a stable photo-<message>.jpg in this companion's Photos folder, even when the
+         card itself has not changed. That is what a device falls back to when its local hash key is missing. */
+      const pics = [];
+      for (const ch of chats) for (const m of arr(ch.messages)) if (m?.image && (!m.who || m.who === p.id)) pics.push([ch, m]);
+      if (pics.length && !picTried.has('phscan:' + p.id)) {
+        picTried.add('phscan:' + p.id);
+        try {
+          const photos = await Drive.folder(f.id, 'Photos');
+          const have = new Set((await Drive.list(`'${photos}' in parents and trashed=false`)).map(x => x.name));
+          for (const [ch, m] of pics) {
+            const name = 'photo-' + String(m.id) + '.jpg';
+            if (have.has(name)) continue;
+            const owner = m.who ? PALS.pals[m.who] : p;
+            const photo = dataUrlBlob(m.image.data) || (m.image.prompt ? await palChatBlob(m.image, owner, ch) : null);
+            if (!photo) continue;
+            const body = await Sealed.blobFor(photo); if (!body) continue;
+            await Drive.putFile(photos, name, body, body.type || 'image/jpeg');
+          }
+        } catch (e) { console.warn('Companion photos', e); }
       }
       if (needsData || port) await Drive.patch(f.id, { name: palFolderName(p), appProperties: { iqPal: p.id, iqUpdated: String(stamp), ...(port ? { iqPortrait: '1' } : {}), ...(Sealed.ready() ? { iqSealed: '1' } : {}) } });
     } catch (e) { console.warn('Companion folder sync failed', e); }
@@ -402,7 +452,7 @@ async function syncPals(root) {
           await Drive.put(f.id, 'Persona.md', await Sealed.file('Persona.md', personaMD(x)), 'application/json');
         }
         if (!port && (x.portrait?.data || x.portrait?.prompt) && !f?.appProperties?.iqPortrait) picTried.add(picMark);
-        if (port) await Drive.putFile(f.id, 'portrait.jpg', port, 'image/jpeg');
+        if (port) { const body = await Sealed.blobFor(port); await Drive.putFile(f.id, 'portrait.jpg', body, body.type || 'image/jpeg'); }
         if (needsData || port) await Drive.patch(f.id, { name: palFolderName(x), appProperties: { iqPersona: x.id, iqUpdated: String(stamp), ...(port ? { iqPortrait: '1' } : {}), ...(Sealed.ready() ? { iqSealed: '1' } : {}) } });
       } catch (e) { console.warn('Persona folder sync failed', e); }
     }

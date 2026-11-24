@@ -47,6 +47,25 @@ function sealedIs(text) {
   try { const j = JSON.parse(text); return !!j && j.kind === SEAL_KIND && !!j.data; } catch { return false; }
 }
 
+/* Pictures are bytes, not JSON. Same AES-GCM key, but a 7-byte header and the raw IV instead of base64,
+   which would grow every photo by a third. The Drive file keeps its .jpg name, but holds opaque bytes. */
+const SEAL_BLOB_MAGIC = new TextEncoder().encode('IQSEAL1');
+async function sealedBlobIs(blob) {
+  if (!blob || blob.size < SEAL_BLOB_MAGIC.length + 12) return false;
+  const head = new Uint8Array(await blob.slice(0, SEAL_BLOB_MAGIC.length).arrayBuffer());
+  return SEAL_BLOB_MAGIC.every((b, i) => head[i] === b);
+}
+async function sealedBlobWrite(blob, key) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, await blob.arrayBuffer());
+  return new Blob([SEAL_BLOB_MAGIC, iv, new Uint8Array(ct)], { type: 'application/octet-stream' });
+}
+async function sealedBlobRead(blob, key) {
+  const buf = new Uint8Array(await blob.arrayBuffer());
+  const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: buf.slice(SEAL_BLOB_MAGIC.length, SEAL_BLOB_MAGIC.length + 12) }, key, buf.slice(SEAL_BLOB_MAGIC.length + 12));
+  return new Blob([pt], { type: 'image/jpeg' });
+}
+
 const Sealed = {
   key: null,
   ready() { return !!this.key; },
@@ -69,5 +88,20 @@ const Sealed = {
     try { return { data: JSON.parse(await this.read(text)) }; } catch (e) { if (e.locked) return { locked: true }; throw e; }
   },
   /* what to upload under a save file's name: sealed once this device holds the vault's key */
-  file(name, text) { return SEAL_FILES.includes(name) && this.key ? sealedText(text, this.key) : Promise.resolve(text); }
+  file(name, text) { return SEAL_FILES.includes(name) && this.key ? sealedText(text, this.key) : Promise.resolve(text); },
+  /* upload bytes: sealed once the vault is unlocked. If a vault exists but is locked, refuse rather than
+     put a readable picture next to the sealed ones. No vault at all keeps the old plain behaviour. */
+  async blobFor(blob) {
+    if (!blob) return blob;
+    if (this.key) return sealedBlobWrite(blob, this.key);
+    const vaultOn = typeof S !== 'undefined' && S.settings?.drive?.vault !== false;
+    if (vaultOn && (S.vaultFound || S.vaultLocked || S.vaultAt)) { const e = new Error('Unlock the vault to save pictures encrypted.'); e.locked = true; throw e; }
+    return blob;
+  },
+  /* bytes from Drive -> a viewable image: plain files from older versions pass through, sealed ones need the key */
+  async openBlob(blob) {
+    if (!blob || !(await sealedBlobIs(blob))) return blob;
+    if (!this.key) return null;
+    try { return await sealedBlobRead(blob, this.key); } catch { return null; }
+  }
 };
