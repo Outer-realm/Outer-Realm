@@ -8,7 +8,13 @@ popd
 
 netstat -ano | findstr /R /C:":7860 .*LISTENING" >nul
 if errorlevel 1 (
-  start "Forge" /min /D "%FORGE_DIR%" "%FORGE_DIR%\run.bat"
+  rem start-forge.bat is the launcher that passes the API and CORS flags Forge needs; run.bat does not
+  rem always take on this install, so use it when it is there and fall back to run.bat when it is not.
+  if exist "%~dp0..\..\start-forge.bat" (
+    start "Forge" /min "%~dp0..\..\start-forge.bat"
+  ) else (
+    start "Forge" /min /D "%FORGE_DIR%" "%FORGE_DIR%\run.bat"
+  )
 ) else (
   echo Forge is already running on port 7860 - not starting a second copy.
 )
