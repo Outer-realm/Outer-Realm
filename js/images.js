@@ -32,26 +32,28 @@ function draftPortraitHTML(D) {
     <div><div class="hint" style="margin:0 0 8px">${p ? 'Your character\'s portrait. Change the appearance and paint again until it looks right.' : 'Paint your character from the appearance above.'}${S.settings.image.mode === 'local' ? ' On your PC this takes 20 seconds to 2 minutes.' : ''}</div>
     <div class="row"><button class="btn sm gold" data-act="draftport">${icon('image')} ${p ? 'Paint again' : 'Paint portrait'}</button>${(() => { const per = myPersona(); return per?.portrait ? `<button class="btn sm ghost" data-act="draftpersonaport">Use ${esc(per.name)}'s photo</button>` : ''; })()}${p ? '<button class="btn sm ghost" data-act="draftportdel">Remove</button>' : ''}</div></div></div>`;
 }
-/* ---------- SFW / NSFW picture models ----------
-   Models are shown as "SFW" / "NSFW", never by file name. An adventure only uses the NSFW model when it is rated
+/* ---------- safe and adult picture models ----------
+   The default checkpoint paints safe pictures; the adult slot paints M-rated pictures of adults. Models are
+   described in words, never by bare file name. An adventure only uses the adult checkpoint when it is rated
    M (Mature) AND nothing about the player character suggests they are under 16. Any single picture whose
-   description mentions a child or teen goes to the SFW model with sexual content blocked, whatever the rating. */
+   description mentions a child or teen goes to the safe model with sexual content blocked, whatever the rating. */
 const NSFW_NAME = /porn|nsfw|lust|xxx|hentai|sex|nude|naked|erot|lewd|adult|r18|18\+/i;
 /* Whether a picture may use the explicit model is decided in js/ageguard.js (AGE.imageAllowed),
    the same rule that decides what the story text may contain. */
 const SAFE_NEG = '(nsfw, nude, naked, explicit:1.3), (nudity, nipples, topless, lingerie, sexual:1.2)';
 const modelKind = m => NSFW_NAME.test(m) ? 'nsfw' : 'sfw';
+const BOTH_NAME = /big.?love|big.?asp|realvis.*lightning/i;
 function modelLabel(m) {
   if (!m) return 'Whatever Forge has loaded';
   const all = [...new Set([...(S.forgeModels || []), S.settings.image.forgeModelSfw, S.settings.image.forgeModelNsfw].filter(Boolean))];
   const same = all.filter(x => modelKind(x) === modelKind(m)); const n = same.indexOf(m);
-  return (modelKind(m) === 'nsfw' ? 'NSFW' : 'SFW') + (same.length > 1 ? ' ' + (n + 1) : '');
+  return (BOTH_NAME.test(String(m)) ? 'SFW + NSFW' : modelKind(m) === 'nsfw' ? 'NSFW' : 'SFW') + (same.length > 1 ? ' ' + (n + 1) : '');
 }
-/* One checkpoint paints every picture, safe or M-rated: switching content never makes Forge flush 6.5 GB
-   out of the card. What a checkpoint can do is described in words, never by file name. */
+/* The default and adult slots can differ; Forge only reloads 6.5 GB when the actual checkpoint changes. Every
+   loaded model is available in either slot, described in words rather than by bare file name. */
 const CP_LABELS = [
   [/realvis.*lightning|lightning/i, 'RealVisXL V5.0 Lightning — safe and uncensored, ~15 s (recommended)'],
-  [/big.?love/i, 'Big Love XL — candid photorealism, safe and uncensored (4-step LoRA automatic)'],
+  [/big.?love/i, 'Big Love XL — candid photorealism, safe or adult (4-step LoRA automatic)'],
   [/pornmaster/i, 'PornMaster Pro — dedicated explicit (4-step LoRA automatic)']
 ];
 function checkpointLabel(m) { const hit = CP_LABELS.find(([re]) => re.test(String(m || ''))); return hit ? hit[1] : modelLabel(m); }
