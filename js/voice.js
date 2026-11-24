@@ -143,16 +143,36 @@ function sceneSegments(c, text, fallback = null) {
   push(null, t.slice(i));
   return segs;
 }
-/* what to say for one message, with whose voice */
+/* [[double brackets]] are inner thoughts. Pull them out before cleanSpeech strips brackets,
+   so the reader can give them their own delivery instead of dropping them or reading them as speech. */
+function thoughtSplit(text) {
+  const out = []; const s = String(text || ''); const re = /\[\[([\s\S]*?)\]\]/g; let i = 0, m;
+  while ((m = re.exec(s))) {
+    if (m.index > i) out.push({ text: s.slice(i, m.index), think: false });
+    out.push({ text: m[1], think: true });
+    i = re.lastIndex;
+  }
+  if (i < s.length) out.push({ text: s.slice(i), think: false });
+  return out.filter(x => /[\p{L}\p{N}]/u.test(x.text));
+}
+/* what to say for one message, with whose voice and whether it was a thought */
 function messageSegments(c, m) {
   /* one known speaker: *actions in asterisks* are narration, everything else is that speaker talking */
   const own = (me, text) => { const segs = []; cleanSpeech(stripSpeakerTags(text)).split(/(\*[^*]+\*)/).forEach(part => { const act = /^\*.*\*$/.test(part); const s = part.replace(/\*/g, '').replace(/[“”"]/g, '').trim(); if (s && /[a-z0-9]/i.test(s)) segs.push({ who: act ? null : me, text: s }); }); return segs; };
-  if (m.role === 'comp') { const p = arr(c.party).find(x => x.id === m.compId); return own(p ? { name: p.name, ent: p } : { name: m.name || 'Companion', ent: null }, m.text); }
-  if (m.role === 'player') {   /* what they say is their character's voice, what they do is the narrator's, (( notes )) are never read */
-    const me = { name: c.character.name, ent: c.character };
-    return parseTurn(cleanSpeech(m.text), m.mode || 'act').filter(p => p.k !== 'ooc').map(p => ({ who: p.k === 'say' ? me : null, text: p.t }));
-  }
-  return sceneSegments(c, m.text);
+  const segs = [];
+  const piece = (text, think) => {
+    let list;
+    if (m.role === 'comp') { const p = arr(c.party).find(x => x.id === m.compId); list = own(p ? { name: p.name, ent: p } : { name: m.name || 'Companion', ent: null }, text); }
+    else if (m.role === 'player') {   /* what they say is their character's voice, what they do is the narrator's, (( notes )) are never read */
+      const me = { name: c.character.name, ent: c.character };
+      list = think ? [{ who: me, text: cleanSpeech(text) }]   /* a thought is theirs, never said aloud */
+        : parseTurn(cleanSpeech(text), m.mode || 'act').filter(p => p.k !== 'ooc').map(p => ({ who: p.k === 'say' ? me : null, text: p.t }));
+    }
+    else list = sceneSegments(c, text);   /* narration stays in the GM's reading voice, quotes get their speaker */
+    for (const s of list) segs.push({ ...s, think: !!think });
+  };
+  for (const part of thoughtSplit(stripSpeakerTags(m.text))) piece(part.text, part.think);
+  return segs;
 }
 
 /* ---------- playback ---------- */
@@ -176,12 +196,13 @@ function queueSegments(c, segs, append = false) {
   if (!append) stopVoice();
   for (const s of segs) {
     const voice = s.who ? voiceOf(c, s.who.ent, s.who.name) || narratorVoice() : narratorVoice();
-    for (const part of chunk(s.text)) VOICE.items.push({ text: part, voice, eng: engine() });
+    for (const part of chunk(s.text)) VOICE.items.push({ text: part, voice, eng: engine(), think: !!s.think });
   }
   if (!VOICE.playing) runVoice();
 }
 function pcClip(item) {
-  const speed = Number(S.settings.ui.voiceRate) || 1; const k = item.voice + '|' + speed + '|' + item.text;
+  /* a thought is read a little slower and softer, so it never sounds like dialogue */
+  const speed = (Number(S.settings.ui.voiceRate) || 1) * (item.think ? 0.94 : 1); const k = item.voice + '|' + speed + '|' + item.text;
   if (VOICE.cache.has(k)) return VOICE.cache.get(k);
   const p = fetch(forgeUrl() + '/iq/tts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: item.text, voice: item.voice, speed }) })
     .then(r => { if (!r.ok) throw new Error('voice ' + r.status); return r.blob(); }).then(b => URL.createObjectURL(b));
@@ -189,11 +210,11 @@ function pcClip(item) {
   if (VOICE.cache.size > 60) VOICE.cache.delete(VOICE.cache.keys().next().value);
   return p;
 }
-function playUrl(url, gen) {
+function playUrl(url, gen, volMul = 1) {
   return new Promise(res => {
     const a = VOICE.audio = VOICE.audio || new Audio();
     const done = () => { a.onended = a.onerror = null; res(); };
-    a.onended = done; a.onerror = done; a.src = url; a.volume = voiceVol();
+    a.onended = done; a.onerror = done; a.src = url; a.volume = voiceVol() * volMul;
     a.play().catch(done);
     const watch = setInterval(() => { if (gen !== VOICE.gen) { clearInterval(watch); try { a.pause(); } catch {} done(); } else if (a.ended || a.error) clearInterval(watch); }, 250);
   });
@@ -203,7 +224,11 @@ function sayDevice(item, gen) {
     if (!TTS || gen !== VOICE.gen) return res();
     const u = new SpeechSynthesisUtterance(item.text);
     const v = ttsVoices().find(x => x.name === item.voice); if (v) u.voice = v;
-    u.rate = Number(S.settings.ui.voiceRate) || 1; u.volume = voiceVol(); u.onend = u.onerror = () => res();
+    const rate = Number(S.settings.ui.voiceRate) || 1;
+    /* the same character's voice, but lower, slower and quieter: a private thought, not dialogue */
+    u.rate = rate * (item.think ? 0.92 : 1); u.volume = voiceVol() * (item.think ? 0.8 : 1);
+    if (item.think) u.pitch = 0.7;
+    u.onend = u.onerror = () => res();
     speechSynthesis.speak(u);
   });
 }
@@ -218,7 +243,7 @@ async function runVoice() {
         let url = null;
         try { url = await mine; } catch (e) { console.warn('PC voice failed, using the device voice', e); VOICE.pc = false; }
         if (gen !== VOICE.gen) break;
-        if (url) await playUrl(url, gen); else await sayDevice({ ...it, voice: S.settings.ui.voiceName }, gen);
+        if (url) await playUrl(url, gen, it.think ? 0.8 : 1); else await sayDevice({ ...it, voice: S.settings.ui.voiceName }, gen);
       } else await sayDevice(it, gen);
     }
   } finally { if (gen === VOICE.gen) { VOICE.playing = false; renderSpeakingState(); } }

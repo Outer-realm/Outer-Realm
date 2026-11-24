@@ -88,6 +88,8 @@ async function gmTurn(opts = {}) {
   let again = false;
   if (!textReady()) { toast('Set up your Story AI first.'); openModal('settings'); return; }
   S.busy = true; S.recap = null; c.messages = c.messages.filter(m => m.role !== 'err'); renderDock();
+  /* finishing a scene that was cut off: the old text is kept and only the rest is written */
+  const resume = opts.resume ? c.messages.find(x => x.id === opts.resume && x.interrupted) : null;
   S.abort = new AbortController(); const signal = S.abort.signal;
   let msg = null;
   try {
@@ -167,6 +169,7 @@ async function gmTurn(opts = {}) {
     const { narration, state: writerState } = parseGM(raw);
     if (!narration) throw new Error('The AI sent back an empty reply. Tap Retry, or try a different model.');
     msg.text = tidyScene(narration); delete msg.streaming; lap('writer');
+    if (resume) { msg.text = String(resume.text || '').trim() + '\n\n' + msg.text; msg.resumed = 1; }
 
     /* 4. optional continuity rewrite, then the agency guard */
     let fixed = false, cut = null;
@@ -229,16 +232,30 @@ async function gmTurn(opts = {}) {
       again = ranTurn || arr(msg.compRolls).length > 0;
     }
   } catch (e) {
-    if (msg) c.messages = c.messages.filter(m => m !== msg);
-    if (e.name === 'AbortError') toast('Stopped.');
+    /* keep whatever was written: a locked phone or a dropped connection shouldn't cost the whole scene */
+    const partial = msg && String(msg.text || '').trim();
+    if (partial) {
+      delete msg.streaming; delete msg.phase; delete msg.checking;
+      msg.interrupted = { at: Date.now(), why: e.name === 'AbortError' ? 'stopped' : String(e.message || e).slice(0, 200) };
+    } else if (msg) c.messages = c.messages.filter(m => m !== msg);
+    if (e.name === 'AbortError') toast(partial ? 'Stopped — the scene is kept. Tap Continue to finish it.' : 'Stopped.');
+    else if (partial) toast('The reply was cut off — tap Continue to finish this scene.', 5000);
     else c.messages.push({ id: uid(), role:'err', text: e.message || String(e) });
   } finally {
     S.busy = false; S.abort = null; S.compThinking = null;
+    /* once a scene finishes, the older cut-off copies are gone */
+    if (msg && c.messages.includes(msg) && !msg.interrupted && String(msg.text || '').trim()) c.messages = c.messages.filter(m => m === msg || !m.interrupted);
     touch(c); renderGame(); scheduleSync();
   }
   if (msg && arr(msg.lookups).length && c.messages.includes(msg)) autoLookups(c, msg.lookups);
   if (msg && !msg.rollAsk && c.messages.includes(msg) && !again) setTimeout(() => { if (!S.busy) memoryCheck(c); }, 1500);   /* runs while you read and type */
   if (again && cur() === c && !c.messages.some(m => m.role === 'err')) gmTurn({ cont: true });
+}
+/* finish a scene that was cut off instead of throwing it away */
+function gmContinue(id) {
+  const c = cur(); if (!c || S.busy) return;
+  if (!c.messages.some(x => x.id === id && x.interrupted)) return;
+  gmTurn({ resume: id, cont: true });
 }
 /* small models sometimes start with "GM:" or end with a question to the player about what they do */
 function tidyScene(t) {

@@ -56,6 +56,13 @@ is('mistral = ... is recognised', (() => {
 is('a prefixed mistral- key is recognised', (() => {
   const p = parse('mistral-' + 'a'.repeat(28)); return p.conns.length === 1 && p.conns[0].preset === 'mistral';
 })());
+is('a newer mstrl_ key is recognised', (() => {
+  const key = 'mstrl_' + 'Q1w2E3r4T5y6U7i8O9p0'.repeat(2) + '_2akLyF';
+  const p = parse(key); return p.conns.length === 1 && p.conns[0].preset === 'mistral' && p.conns[0].apiKey === key;
+})());
+is('the bare-key rule still ignores the mstrl_ label text', (() => {
+  const p = parse('mistral = mstrl_' + 'Zz9'.repeat(9)); return p.conns.length === 1 && p.conns[0].preset === 'mistral' && /^mstrl_/.test(p.conns[0].apiKey);
+})());
 is('an OpenRouter key still wins over the bare-key rule', (() => {
   const p = parse('sk-or-v1-' + 'a'.repeat(32)); return p.conns.length === 1 && p.conns[0].preset === 'openrouter';
 })());

@@ -104,8 +104,11 @@ async function chat(messages, opts = {}) {
   if (!first) throw new Error('No AI connected yet. Open Setup and add a free key.');
   if (!connReady(first)) throw new Error(`${first.label} has no model chosen yet. Open Settings → Story AI.`);
   const order = [first, ...(S.settings.ai.fallback ? conns().filter(c => c !== first && connReady(c)) : [])];
+  /* a model that just said "slow down" goes last, so the turn is not spent queueing behind it again */
+  const warm = order.filter(c => !coolLeft(c)), cold = order.filter(c => coolLeft(c));
+  const list = warm.length ? [...warm, ...cold] : order;
   const errs = [];
-  for (const conn of order) {
+  for (const conn of list) {
     for (let n = 0; ; n++) {
       try {
         const out = await chatOne(conn, messages, { ...opts, model: conn === first && opts.helper && (S.settings.ai.helperModel || '').trim() ? S.settings.ai.helperModel.trim() : '' });
@@ -116,6 +119,8 @@ async function chat(messages, opts = {}) {
         /* a throttled free model gets one quick second try, but only when there is no other key to move to:
            switching connections answers sooner than queueing behind the same busy one again */
         if (!n && order.length === 1 && [429, 503, 529].includes(e.status) && !opts.signal?.aborted) { await sleep(600); continue; }
+        if ([429, 503, 529].includes(e.status)) coolConn(conn, 90e3);
+        else if (e.status === 402) coolConn(conn, 6 * 3600e3);   /* out of credit today: don't try it first again */
         errs.push(e);
         break;
       }
@@ -142,6 +147,17 @@ function fitContext(messages, ctx, maxOut) {
   return out;
 }
 function aiError(msg, status, retry) { const e = new Error(msg); e.status = status; e.retry = retry; return e; }
+
+/* Free tiers throttle hard. Remember which connection+model just asked us to slow down, so the
+   next turn tries a working one first instead of queueing behind the same busy model. */
+function coolKey(conn) { return conn.id + '|' + (conn.model || ''); }
+function coolLeft(conn) { const m = (S.settings.ai && S.settings.ai.cool) || {}; return Math.max(0, (m[coolKey(conn)] || 0) - Date.now()); }
+function coolConn(conn, ms) {
+  const ai = S.settings.ai; ai.cool = ai.cool || {}; ai.cool[coolKey(conn)] = Date.now() + ms;
+  const now = Date.now(); for (const k of Object.keys(ai.cool)) if (ai.cool[k] < now) delete ai.cool[k];
+  saveSettings(false);
+}
+const coolLabel = ms => { const m = Math.ceil(ms / 60000); return m >= 60 ? Math.round(m / 60) + 'h' : m + 'm'; };
 
 /* =========================================================================
    Ollama on a 6 GB card: model roles, the two content modes, /api/chat
@@ -366,6 +382,10 @@ const stripSpeakerTags = t => String(t || '').replace(/\{[^{}\n]{1,40}\}(?=\s*[�
 function md(t) {
   return stripSpeakerTags(t).trim().split(/\n{2,}/).map(p => '<p>' + esc(p)
     .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    /* [[double square brackets]] are a character's private thought: blue, so they stand apart from speech.
+       ((double parentheses)) are a direction or aside, in narration as well as in the player's own turns. */
+    .replace(/\[\[([^\[\]\n]{1,400})\]\]/g, '<em class="think">$1</em>')
+    .replace(/\(\(([^()\n]{1,400})\)\)/g, '<span class="tooc">(( $1 ))</span>')
     .replace(/(^|[^*\w])\*(?!\s)([^*\n]+?)\*(?!\w)/g, '$1<em class="act">$2</em>')
     .replace(/(^|[\s(])_(?!\s)([^_\n]+?)_(?=$|[\s.,!?)])/g, '$1<em class="think">$2</em>')
     .replace(/\[([A-Z][^\]\n]{1,140})\]/g, '<span class="sys">[$1]</span>')
@@ -561,11 +581,12 @@ function buildMessages(c) {
   out[out.length - 1].content += REPLY_NOTE;
   return out;
 }
-async function maybeSummarize(c) {
+async function maybeSummarize(c, force = false) {
   const start = c.summarizedUpTo || 0;
   const keep = keepRecent();
-  if (c.messages.length - start <= keep + SUMMARIZE_AFTER) return;
-  const end = c.messages.length - keep;
+  if (!force && c.messages.length - start <= keep + SUMMARIZE_AFTER) return;
+  const end = Math.max(start, c.messages.length - keep);
+  if (end <= start) return;
   const chunk = c.messages.slice(start, end).filter(m => ['gm','player','roll','comp'].includes(m.role) && !m.hidden && !m.fromGM)
     .map(m => `${m.role === 'gm' ? 'GM' : m.role === 'roll' ? 'DICE' : m.role === 'comp' ? m.name : (m.who || 'PLAYER')}: ${m.role === 'gm' ? (m.raw || m.text) : m.text}`).join('\n\n');
   try {
@@ -640,7 +661,7 @@ HOW TO WRITE A TURN
 DIALOGUE AND VOICES (the app reads the story aloud, with a different voice for each character)
 - Put ONLY words spoken out loud inside double quotes "like this".
 - Right before each opening quote, write the speaker's name in curly braces: {Name}"Their words." The braces are hidden from the player. Tag every quote, even several from the same speaker. For an unnamed speaker use a short label: {Guard}"Halt!"
-- Actions, gestures and expressions go in *asterisks*. Inner thoughts, signs and written words go in _underscores_.
+- Actions, gestures and expressions go in *asterisks*. A character's inner thoughts go in [[double square brackets]]. Signs, titles and written words go in _underscores_. Directions from the player to you (the GM) arrive in ((double parentheses)).
 - Names, titles, labels and special terms are never in double quotes: write blessed water, never "blessed water".
 - Format: Narration. {Speaker A}"Spoken words." More narration. {Speaker B}"Their reply." {Speaker B}"More from the same speaker, tagged again."`;
 }
@@ -707,6 +728,9 @@ function buildWriterMessages(c) {
   const quests = arr(c.quests).filter(q => q.status === 'active').map(q => q.title); if (quests.length) sys.push(`Active quests: ${quests.join('; ')}`);
   if (!comp) for (const x of writerModules(c)) sys.push('', x);
   { const pd = pacingDirective(c); if (pd) sys.push('', pd); }   /* dice / combat / party rules switch on and off, so they go last */
+  /* a reply that was cut off (phone locked, connection dropped, Stop) is kept and finished, not restarted */
+  const cut = [...c.messages].reverse().find(m => m.interrupted && String(m.text || '').trim());
+  if (cut) sys.push('', 'THIS SCENE WAS CUT OFF PART WAY THROUGH. It had reached:', '…' + String(cut.text).trim().slice(-800), 'Continue the same scene from exactly where that stops. Do not repeat, summarise or rewrite any of it, and do not start a new scene.');
   const out = [{ role:'system', content: sys.join('\n') }];
   const start = Math.max(c.summarizedUpTo || 0, c.messages.length - (keepRecent() + SUMMARIZE_AFTER));
   for (const m of c.messages.slice(start)) {

@@ -92,6 +92,18 @@ ${scenes}` }
   finally { c.memBusy = false; renderMemNow(c); }
 }
 function renderMemNow(c) { if (S.panel === 'mem' && cur() === c) renderPanel(); }
+/* condense the older turns into the running summary on demand (same helper the app uses by itself) */
+async function condenseNow(c) {
+  if (!c || c.memBusy) return;
+  c.memBusy = true; renderMemNow(c);
+  const before = num(c.summarizedUpTo);
+  try { await maybeSummarize(c, true); }
+  catch (e) { console.warn('Condense failed', e); toast('Could not condense the story: ' + (e.message || e), 5000); }
+  c.memBusy = false;
+  touch(c); scheduleSync(); renderMemNow(c);
+  if (num(c.summarizedUpTo) > before) toast('Older turns are now in the story so far.', 4000);
+  else toast('Nothing to condense yet — the story is still short.', 4000);
+}
 
 /* ---------- Panel → Memory ---------- */
 function panelMemHTML(c) {
@@ -109,6 +121,7 @@ function panelMemHTML(c) {
     ${arr(c.continuity).length ? `<div class="lbl">Continuity notes</div>${arr(c.continuity).slice(-6).map((n, i, a) => `<div class="pline memrow"><span>${esc(n)}</span><button class="link" data-act="memcont" data-i="${arr(c.continuity).length - a.length + i}" title="Remove">✕</button></div>`).join('')}` : ''}
     ${done.length ? `<div class="lbl">Recently resolved</div>${done.map(t => `<div class="pline" style="opacity:.6">✓ ${esc(t.text)}</div>`).join('')}` : ''}
     <div class="lbl">Story so far</div><p class="ptext">${esc(c.summary || 'Written automatically once the story gets long.')}</p>
+    <p class="hint" style="margin:0">${num(c.summarizedUpTo) ? `${num(c.summarizedUpTo)} older messages are condensed into it; the GM always gets the summary plus the newest few scenes.` : `Starts writing itself once the story passes ${keepRecent() + SUMMARIZE_AFTER} messages.`} <button class="link" data-act="memcondense">Condense now</button></p>
     <div class="lbl">Key facts (${arr(c.memory).length})</div>
     ${arr(c.memory).slice(-12).reverse().map(m => `<div class="pline">${esc(m)}</div>`).join('') || '<p class="hint">None yet.</p>'}
     <div class="lbl">Story cards (${arr(c.cards).length})</div>
@@ -121,6 +134,7 @@ function memoryAction(act, el, c) {
   switch (act) {
     case 'memcheck': memoryCheck(c, true); return true;
     case 'memdone': { const t = arr(c.threads).find(x => x.id === el.dataset.id); if (t) { t.status = 'resolved'; t.done = Date.now(); touch(c); renderPanel(); } return true; }
+    case 'memcondense': condenseNow(c); return true;
     case 'memadd': { const v = ($('#memAdd')?.value || '').trim(); if (!v) return true; c.threads = arr(c.threads); c.threads.push({ id: uid(), text: v.slice(0, 200), status: 'open', t: Date.now() }); touch(c); renderPanel(); return true; }
     case 'memcont': { c.continuity = arr(c.continuity); c.continuity.splice(num(el.dataset.i), 1); touch(c); renderPanel(); return true; }
   }

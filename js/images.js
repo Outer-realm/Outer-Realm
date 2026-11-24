@@ -220,7 +220,14 @@ function localImageUrl(prompt, seed, c, neg = '', ref = null, subject = null, mo
   if (LOCAL.url[job.k]) return LOCAL.url[job.k];
   if (LOCAL.fail[job.k] && Date.now() - (LOCAL.failAt?.[job.k] || 0) < 30000) return localFailURL(job.k);
   if (LOCAL.fail[job.k]) delete LOCAL.fail[job.k];
-  if (!LOCAL.jobs[job.k]) { LOCAL.jobs[job.k] = job; LOCAL.queue.push(job); setTimeout(pumpLocal, 0); }
+  if (!LOCAL.jobs[job.k]) {
+    LOCAL.jobs[job.k] = job; LOCAL.queue.push(job); setTimeout(pumpLocal, 0);
+    /* pictures paint in the background, one at a time, so the story never waits on the graphics card */
+    if (LOCAL.queue.length > 1 && Date.now() - (LOCAL.saidQueueAt || 0) > 20000) {
+      LOCAL.saidQueueAt = Date.now();
+      toast(`Painting in the background — ${LOCAL.queue.length} pictures waiting. The story keeps going.`, 3500);
+    }
+  }
   return localPH(job.k);
 }
 async function pumpLocal() {
@@ -698,7 +705,7 @@ const Drive = {
   async list(q) {
     let out = [], pageToken = '';
     do {
-      const p = new URLSearchParams({ q, fields:'nextPageToken,files(id,name,mimeType,appProperties,modifiedTime,parents)', pageSize:'200', supportsAllDrives:'true', includeItemsFromAllDrives:'true' });
+      const p = new URLSearchParams({ q, fields:'nextPageToken,files(id,name,mimeType,appProperties,modifiedTime,parents,hasThumbnail)', pageSize:'200', supportsAllDrives:'true', includeItemsFromAllDrives:'true' });
       if (pageToken) p.set('pageToken', pageToken);
       const j = await (await this.api('https://www.googleapis.com/drive/v3/files?' + p)).json();
       out = out.concat(j.files || []); pageToken = j.nextPageToken || '';
@@ -736,16 +743,44 @@ const Drive = {
   },
   /* write a file from binary (a picture), creating it or replacing it */
   async putFile(parent, name, blob, mime) {
+    /* Sealed bytes are not an image any more. If Drive is told otherwise it keeps the preview it
+       rendered while the file was plain, and serves that picture to anyone the folder is shared with. */
+    const opaque = await sealedBlobIs(blob);
+    if (opaque) mime = OPAQUE_MIME;
     const id = await this.fileId(parent, name);
-    if (id) { await this.api(`https://www.googleapis.com/upload/drive/v3/files/${id}?uploadType=media&supportsAllDrives=true`, { method:'PATCH', headers:{ 'Content-Type': mime }, body: blob }); return id; }
+    if (id) {
+      await this.api(`https://www.googleapis.com/upload/drive/v3/files/${id}?uploadType=media&supportsAllDrives=true`, { method:'PATCH', headers:{ 'Content-Type': mime }, body: blob });
+      if (opaque) await hideDrivePreview(id);
+      return id;
+    }
     const b = 'iq_' + uid(); const meta = JSON.stringify({ name, parents:[parent], mimeType: mime });
     const body = new Blob([`--${b}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${meta}\r\n--${b}\r\nContent-Type: ${mime}\r\n\r\n`, blob, `\r\n--${b}--`]);
     const r = await this.api('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id&supportsAllDrives=true', { method:'POST', headers:{ 'Content-Type':'multipart/related; boundary=' + b }, body });
     return (this.files[parent + '/' + name] = (await r.json()).id);
   },
+  /* a brand-new file, even if one of that name already exists: a new id is the only way to be sure
+     Drive has no preview cached for it */
+  async createOpaque(parent, name, blob) {
+    const b = 'iq_' + uid();
+    const meta = JSON.stringify({ name, parents:[parent], mimeType: OPAQUE_MIME });
+    const body = new Blob([`--${b}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${meta}\r\n--${b}\r\nContent-Type: ${OPAQUE_MIME}\r\n\r\n`, blob, `\r\n--${b}--`]);
+    const r = await this.api('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id&supportsAllDrives=true', { method:'POST', headers:{ 'Content-Type':'multipart/related; boundary=' + b }, body });
+    return (await r.json()).id;
+  },
   async getJSON(id) { const r = await this.api(`https://www.googleapis.com/drive/v3/files/${id}?alt=media&supportsAllDrives=true`); try { return await r.json(); } catch { return null; } },
   async getText(id) { const r = await this.api(`https://www.googleapis.com/drive/v3/files/${id}?alt=media&supportsAllDrives=true`); return r.text(); }
 };
+/* Drive keeps a rendered preview of every file it believes is a picture, and serves it even after the
+   bytes have been sealed. Marking a sealed file as opaque stops Drive treating it as an image at all. */
+const OPAQUE_MIME = 'application/octet-stream';
+async function hideDrivePreview(id) {
+  try {
+    await Drive.api(`https://www.googleapis.com/drive/v3/files/${id}?supportsAllDrives=true`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mimeType: OPAQUE_MIME })
+    });
+    return true;
+  } catch (e) { console.warn('Could not hide the Drive preview for', id, e); return false; }
+}
 /* ---------- pictures painted on the PC are kept in Drive → "Ironquill pictures", so every device shares them ---------- */
 const DriveImg = {
   folder: null, index: null, loading: null, busy: false, sealing: false,
@@ -872,24 +907,54 @@ const DriveImg = {
         }
       }
       const list = [...files.values()]; const total = list.length;
-      let i = 0, sealed = 0, already = 0; const failed = [];
+      let i = 0, sealed = 0, already = 0, rebuilt = 0; const failed = [];
       for (const f of list) {
         i++; say(`Checking picture ${i} of ${total}…`);
         try {
           const r = await Drive.api(`https://www.googleapis.com/drive/v3/files/${f.id}?alt=media&supportsAllDrives=true`);
           const b = await r.blob(); if (!b.size) throw new Error('empty file');
-          if (await sealedBlobIs(b)) {
+          const wasSealed = await sealedBlobIs(b);
+          let body = b;
+          if (wasSealed) {
             if (!(await Sealed.openBlob(b))) throw new Error('sealed with a key this vault does not hold');
-            already++; continue;
+            already++;
+          } else {
+            body = await Sealed.blobFor(b);
+            sealed++; say(`Sealed ${sealed + already} of ${total}: ${f.name}`);
           }
-          const body = await Sealed.blobFor(b);
-          await Drive.api(`https://www.googleapis.com/upload/drive/v3/files/${f.id}?uploadType=media&supportsAllDrives=true`, { method:'PATCH', headers:{ 'Content-Type': body.type || 'application/octet-stream' }, body });
-          sealed++; say(`Sealed ${sealed + already} of ${total}: ${f.name}`);
+          /* Drive keeps a preview per file id and will not drop one on request, and hasThumbnail is not
+             a reliable way to find the survivors. So every sealed picture gets a fresh id here (the old
+             file goes to the bin): with no preview possible for a new id, none can be left behind.
+             The bytes just read are uploaded once, straight to the new file — nothing is written back to
+             the old one, and nothing is downloaded twice. */
+          if (await this.rebuildOne(f, body)) { rebuilt++; say(`Re-created ${rebuilt} of ${total} with a new file id…`); }
+          else {
+            /* the new copy could not be made: keep the old file as safe as it can be instead */
+            if (!wasSealed) await Drive.api(`https://www.googleapis.com/upload/drive/v3/files/${f.id}?uploadType=media&supportsAllDrives=true`, { method:'PATCH', headers:{ 'Content-Type': body.type || OPAQUE_MIME }, body });
+            await hideDrivePreview(f.id);
+          }
         } catch (e) { failed.push(`${f.name}: ${e.message || e}`); console.warn('Picture seal failed', f.name, e); }
       }
-      const msg = `Checked ${total} picture${total === 1 ? '' : 's'}: ${sealed} newly sealed, ${already} already sealed${failed.length ? `, ${failed.length} failed` : ''}.`;
-      return { total, sealed, already, failed, msg };
+      const msg = `Checked ${total} picture${total === 1 ? '' : 's'}: ${sealed} newly sealed, ${already} already sealed${rebuilt ? `, ${rebuilt} re-created` : ''}${failed.length ? `, ${failed.length} failed` : ''}. Every sealed picture has a new file id, so Drive has no preview to show; the old copies are in Drive's bin.`;
+      return { total, sealed, already, rebuilt, failed, msg };
     } finally { this.sealing = false; }
+  },
+  /* sealed bytes -> a new Drive file with a new id, old file into the bin. Ciphertext is copied as-is:
+     nothing is decrypted, and the picture key stays the same. `known` is the blob the sweep already
+     read, so a file is never downloaded twice. */
+  async rebuildOne(f, known = null) {
+    try {
+      const parent = arr(f.parents)[0] || this.folder;
+      let blob = known;
+      if (!blob) { const r = await Drive.api(`https://www.googleapis.com/drive/v3/files/${f.id}?alt=media&supportsAllDrives=true`); blob = await r.blob(); }
+      if (!blob.size || !(await sealedBlobIs(blob))) return false;   /* never re-upload anything readable */
+      const id = await Drive.createOpaque(parent, String(f.name), blob);
+      Drive.files[parent + '/' + f.name] = id;   /* the name now belongs to the new file, not the binned one */
+      await Drive.api(`https://www.googleapis.com/drive/v3/files/${f.id}?supportsAllDrives=true`, { method:'PATCH', headers:{ 'Content-Type':'application/json' }, body: JSON.stringify({ trashed: true }) });
+      const k = String(f.name || '').replace(/\.jpg$/i, '');
+      if (this.index) this.index[k] = id;
+      return true;
+    } catch (e) { console.warn('Could not re-create picture', f.name, e); return false; }
   },
   /* remember what still needs uploading (the picture itself waits in this device's storage) */
   pending() { return arr(LS.get('iq.imgPending', [])); },
@@ -936,7 +1001,7 @@ async function sealPicturesFromUI() {
   if (!Drive.valid()) return toast('Connect Google Drive first, then run this.');
   if (!Sealed.ready() && Vault.get()) { try { await Vault.pull({ quiet: true }); } catch {} }
   if (!Sealed.ready()) { toast('Unlock the vault first: type its passphrase and tap Unlock & load keys.', 7000); $('#vaultPass')?.focus(); return; }
-  if (!confirm('Encrypt every picture already in Drive?\n\nScene images, game Photos, companion portraits and chat photos are rewritten in place. Other devices will need the vault passphrase to view them, and older versions of the app will no longer show them.')) return;
+  if (!confirm('Encrypt every picture already in Drive?\n\nScene images, game Photos, companion portraits and chat photos are sealed, then each one is copied to a NEW file and the old file is moved to Drive\'s bin. That is what clears the previews Google already made.\n\nThe old copies stay in the bin for about 30 days, then Google deletes them. Other devices will need the vault passphrase to view the pictures, and older versions of the app will no longer show them.')) return;
   S.picSealStatus = 'Looking through your Drive picture folders…'; renderModal();
   try {
     const r = await DriveImg.sealAll(t => { S.picSealStatus = t; const el = $('#picSealStatus'); if (el) el.textContent = t; });

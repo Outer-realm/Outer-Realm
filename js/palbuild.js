@@ -80,6 +80,17 @@ function palRules(D) {
 /* the detailed physical questions: body, face and hair. Nothing asked here is clothing or a pose, so the
    answers can ride on every picture without dressing her in something the moment didn't ask for. */
 const PHYS_MAX = 60;   /* characters per answer: the whole panel stays inside the picture prompt budget */
+/* the answers, in panel order, so the AI writes the same set the form asks for */
+const PHYS_FIELDS = {
+  height: 'Height', weight: 'Weight, or just their build', build: 'Build: frame, shoulders, waist, hips, legs',
+  bust: 'Bust (adult only)', waistHips: 'Waist and hips (adult only)',
+  skin: 'Skin: tone and texture', hands: 'Hands', marks: 'Marks: freckles, moles, scars, tan lines (and where)',
+  tattoos: 'Tattoos and piercings', posture: 'Posture and how they carry themselves', notice: 'What people notice first',
+  faceShape: 'Face shape', eyes: 'Eyes: colour, shape, lashes', brows: 'Eyebrows', nose: 'Nose',
+  mouth: 'Mouth and lips', teeth: 'Teeth and smile', cheeks: 'Cheeks, dimples, lines', faceExtra: 'Anything worn on the face',
+  hair: 'Hair: colour, length, texture', hairStyle: 'How they usually wear it', extra: 'Anything else that should always be in their description'
+};
+const PHYS_ADULT_ONLY = ['bust', 'waistHips'];
 function physHTML(D) {
   const x = D.phys || {}; const adult = !!D.adult && !AGE.isProtected(D);
   const v = k => String(x[k] || '');
@@ -88,6 +99,7 @@ function physHTML(D) {
   return `<details class="physpanel" ${S.palPhysOpen ? 'open' : ''}>
       <summary><b>Detailed physical description</b> <span class="hint" style="margin:0">${physNote(D)}</span></summary>
       <p class="hint">Her body, face and hair only. These answers join her permanent look, so every picture (and the chat's own description of her) starts from them. Clothes and poses are never saved here: those still come from the chat or from the picture prompt. Your Locked tags box is added separately. Keep each answer to a phrase (up to ${PHYS_MAX} characters); use the Face and Body boxes above for anything longer.</p>
+      <div class="row wrap" style="margin:8px 0 2px"><button class="btn sm ghost" data-act="palbphysai" ${S.palPhysBusy ? 'disabled' : ''}>${S.palPhysBusy ? '<span class="spin sm"></span> Writing…' : icon('spark') + ' Fill this section with AI'}</button><span class="hint" style="margin:0">Fills the answers you left empty. Everything you wrote is kept.</span></div>
       <div class="sect" style="font-size:16px">Body</div>
       <div class="kv">${f('height', 'Height', '168 cm (5 ft 6 in)')}${f('weight', 'Weight, or just her build', '59 kg, or slim / curvy / athletic')}</div>
       ${ta('build', 'Build: frame, shoulders, waist, hips, legs', 'small frame, narrow shoulders, wide hips, long legs')}
@@ -107,6 +119,46 @@ function physHTML(D) {
       <div class="kv">${f('hair', 'Hair: colour, length, texture', 'dark auburn, waist-length, thick and wavy')}${f('hairStyle', 'How she usually wears it', 'loose, or a messy bun when working')}</div>
       ${ta('extra', 'Anything else that should always be in her description', 'a small bird tattoo behind her ear, always smells of coffee')}
     </details>`;
+}
+/* the detailed panel, written by the AI from the rest of the card. Only empty answers are filled;
+   anything the player already wrote wins and is passed to the AI as a fact to stay consistent with. */
+async function palPhysAI() {
+  const D = S.palDraft; if (!D || S.palPhysBusy) return;
+  D.phys = D.phys || {};
+  const adult = !!D.adult && !AGE.isProtected(D);
+  const keys = Object.keys(PHYS_FIELDS).filter(k => adult || !PHYS_ADULT_ONLY.includes(k));
+  const has = k => !!String(D.phys[k] || '').trim();
+  const blanks = keys.filter(k => !has(k));
+  if (!blanks.length && !confirm('Every detailed answer is already filled in. Replace them all with AI versions?')) return;
+  /* filling the blanks keeps the player's answers as rules; replacing them is a fresh take, so the old
+     answers are deliberately not shown, or the model just paraphrases itself and nothing changes */
+  const replace = !blanks.length;
+  const target = replace ? keys : blanks;
+  const y = scrollY;
+  try {
+    S.palPhysBusy = true; renderPalEditor(); scrollTo(0, y);
+    const known = [['Name', D.name], ['Age', D.age], ['Gender', D.sex], ['Tagline', D.tagline], ['Personality', D.personality], ['Backstory', D.backstory], ['Face summary', D.face], ['Body summary', D.body], ['Picture tags', D.tags]]
+      .filter(([, v]) => String(v || '').trim()).map(([l, v]) => l + ': ' + String(v).slice(0, 500));
+    const already = replace ? '' : keys.filter(has).map(k => '- ' + PHYS_FIELDS[k] + ': ' + String(D.phys[k]).trim()).join('\n');
+    const raw = await chat([
+      { role:'system', content: `You write the detailed physical description of one character for an AI companion app. These answers travel with the character into every picture.\nRules:\n- Body, face and hair only: never clothing, poses, moods or personality.\n${replace ? '- Choose these details yourself: keep the same person from their name, age, gender and story, but this is a new description, not a rewrite of an old one.\n' : '- Match what is already written, and the character\'s name, age and gender.\n'}- One phrase per answer, at most ${PHYS_MAX} characters, specific enough to draw: colours, shapes, sizes, and where a mark sits.\n- Plain and non-sexual, even for the optional measurements.\nReply with JSON only, exactly these keys:\n${target.map(k => '"' + k + '": "' + PHYS_FIELDS[k] + '"').join(',\n')}` },
+      { role:'user', content: `${known.join('\n')}${already ? '\n\nALREADY WRITTEN (never contradict):\n' + already : ''}\n\n${replace ? 'Write a fresh set of answers for every key, without reusing or lightly rewording anything you have written for this character before.' : 'Write only the missing answers.'}` }
+    ], { stream:false, maxTokens: 700, temperature: 0.85, json: true });
+    const j = tryJSON(stripThink(raw)) || {};
+    let n = 0;
+    for (const k of target) {
+      const s = String(j[k] || '').replace(/\s+/g, ' ').trim();
+      if (!s) continue;
+      D.phys[k] = s.slice(0, PHYS_MAX); n++;
+    }
+    if (!n) throw new Error('the AI sent back nothing usable');
+    toast(`Filled ${n} answer${n === 1 ? '' : 's'}. Save the card to keep ${n === 1 ? 'it' : 'them'}.`, 4500);
+  } catch (e) { toast('Could not fill that in: ' + (e.message || e), 5000); }
+  finally {
+    S.palPhysBusy = false;
+    /* the flag is cleared first, so a panel that fails to redraw can never leave the button disabled */
+    try { const yy = scrollY; renderPalEditor(); scrollTo(0, yy); } catch (e) { console.warn('Could not redraw the companion panel', e); }
+  }
 }
 function renderPalEditor() {
   const D = S.palDraft; if (!D) return renderLibrary();
@@ -292,6 +344,7 @@ function palBuildAction(act, el) {
     case 'palbupload': palUploadPortrait(); return true;
     case 'palbzoom': if (D?.portrait) openLightbox(palImg(D.portrait, D), D.name, D.portrait.prompt ? { prompt: D.portrait.prompt } : null); return true;
     case 'palbtags': palAIStep(false, ['tags']); return true;
+    case 'palbphysai': palPhysAI(); return true;
     case 'palbai': palAIStep(!!el.dataset.rw); return true;
     case 'palboutadd': if (D) { D.outfits = [...arr(D.outfits), { id: uid(), name: '', desc: '' }]; const y = scrollY; renderPalEditor(); scrollTo(0, y); } return true;
     case 'palboutdel': if (D) { const o = arr(D.outfits)[num(el.dataset.i)]; D.outfits = arr(D.outfits).filter(x => x !== o); if (D.outfit === o?.id) D.outfit = ''; const y = scrollY; renderPalEditor(); scrollTo(0, y); } return true;

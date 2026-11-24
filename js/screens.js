@@ -193,7 +193,7 @@ function msgHTML(m, c, isLastGM) {
   }
   if (m.role === 'gm') {
     const spk = TTS && S.settings.ui.voice !== 'off' ? `<button data-act="speak" data-mid="${m.id}">${icon('speaker')} Read</button>` : '';
-    const acts = m.streaming || S.busy || m.checking ? '' : isLastGM ? `<div class="msgacts">${spk}<button data-act="regen">${icon('redo')} Retry</button><button data-act="undo">${icon('undo')} Undo turn</button><button data-act="editmsg" data-mid="${m.id}">${icon('book')} Edit</button><button data-act="fixopen">${icon('spark')} Fix story</button>${m.original ? `<button data-act="uncut" data-mid="${m.id}">${icon('undo')} Put cut lines back</button>` : ''}${!m.image && S.settings.image.mode !== 'off' ? `<button data-act="illustrate" data-mid="${m.id}">${icon('image')} Illustrate</button>` : ''}</div>` : `<div class="msgacts">${spk}<button data-act="editmsg" data-mid="${m.id}">${icon('book')} Edit</button></div>`;
+    const acts = m.streaming || S.busy || m.checking ? '' : isLastGM ? `<div class="msgacts">${spk}<button data-act="regen">${icon('redo')} Retry</button><button data-act="undo">${icon('undo')} Undo turn</button><button data-act="editmsg" data-mid="${m.id}">${icon('book')} Edit</button>${m.interrupted ? `<button data-act="gmcont" data-id="${m.id}">▶ Continue</button>` : ''}<button data-act="fixopen">${icon('spark')} Fix story</button>${m.original ? `<button data-act="uncut" data-mid="${m.id}">${icon('undo')} Put cut lines back</button>` : ''}${!m.image && S.settings.image.mode !== 'off' ? `<button data-act="illustrate" data-mid="${m.id}">${icon('image')} Illustrate</button>` : ''}</div>` : `<div class="msgacts">${spk}<button data-act="editmsg" data-mid="${m.id}">${icon('book')} Edit</button></div>`;
     if (S.editing === m.id) return `<div class="msg gm" data-id="${m.id}">${sceneHTML(m, c)}<div class="editbox"><textarea id="editText">${esc(m.text)}</textarea><div class="row" style="margin-top:8px"><button class="btn sm gold" data-act="editsave" data-mid="${m.id}">Save</button><button class="btn sm ghost" data-act="editcancel">Cancel</button></div></div></div>`;
     const checking = m.checking ? `<div class="notes"><span class="note"><span class="spin sm" style="display:inline-block;vertical-align:-3px;margin-right:6px"></span>${typeof m.checking === 'string' ? esc(m.checking) : 'Checking the scene…'}</span></div>` : '';
     const card = isLastGM && c.pendingRoll && c.pendingRoll.msgId === m.id && !S.busy ? rollCardHTML(c) : '';
@@ -408,7 +408,7 @@ function settingsHTML() {
       <div class="row" style="margin-top:10px"><button class="btn gold" data-act="vaultsave">${icon('cloud')} Save keys to the vault</button><button class="btn" data-act="vaultload">Unlock &amp; load keys</button></div>
       <div class="row" style="margin-top:8px">${Vault.stored() ? '<button class="btn sm ghost" data-act="vaultforget">Forget passphrase here</button>' : ''}<button class="btn sm ghost" data-act="vaultplain">Delete the old unencrypted keys file</button></div>
       <div class="sect" style="font-size:20px">Pictures in Drive</div>
-      <p class="hint">Scene images, game Photos, companion portraits and chat photos are sealed with your vault key before upload. Pictures written by an older version stay readable until they are opened or sealed here.</p>
+      <p class="hint">Scene images, game Photos, companion portraits and chat photos are sealed with your vault key before upload. Pictures written by an older version stay readable until they are opened or sealed here. Every picture is re-created under a new file id and the old copy is moved to Drive's bin, because Google's preview cache belongs to the file id and cannot be cleared in place. The bin keeps the old copies for about 30 days.</p>
       <div class="row"><button class="btn" data-act="picseal" ${Drive.valid() ? '' : 'disabled'}>${icon('shield')} Encrypt pictures already in Drive</button></div>
       <p class="hint" id="picSealStatus">${esc(S.picSealStatus || '')}</p>
       <div class="row" style="margin-top:16px"><button class="btn gold" data-act="sync">${icon('cloud')} ${Drive.valid() ? 'Sync now' : 'Connect & sync'}</button>${Drive.valid() || LS.get('iq.driveok', false) ? `<button class="btn ghost" data-act="drivedisc">Disconnect</button>` : ''}</div>
@@ -427,6 +427,8 @@ function settingsHTML() {
       <div class="sect" style="font-size:20px">Content rules</div>
       <p class="hint">A fixed set of checks for the age and protection rules every story prompt uses: ages, protection, and which pictures are allowed.</p>
       <button class="btn" data-act="npccheckrules">Check content rules</button>
+      <div class="sect" style="font-size:20px">This build</div>
+      <p class="hint">Build <b>${esc((document.querySelector('meta[name=build]') || {}).content || 'dev')}</b>. The page asks for every script and stylesheet by its contents, so a deploy is either fully live or visibly not — no half-updated files. <code>node scripts/verify-live.js</code> compares this build with the published site.</p>
       <div class="sect" style="font-size:20px">Danger zone</div>
       <button class="btn danger" data-act="wipe">Erase everything on this device</button>`;
   }
@@ -525,21 +527,36 @@ function modelListHTML(c) {
     + sec('★ Recommended', g.rec, true) + sec('★ Story models (best for writing scenes)', g.story, true)
     + sec(g.rec.length || g.story.length ? 'Other models' : 'Models', g.rest, false)
     + (q && !all.some(id => id.toLowerCase() === q) ? `<button class="mrow" data-act="modelset" data-id="${c.id}" data-m="${esc(S.modelQ.trim())}">✎ Use “${esc(S.modelQ.trim())}”</button>` : '')
-    + (!all.length && !c.modelsLoading && !q ? '<p class="hint">No models found for this key. Type a model name above.</p>' : '');
+    + (!all.length && !c.modelsLoading && !q ? '<p class="hint">No models found for this key. <button class="link" data-act="modelsearch">Type a model name</button></p>' : '');
   return body;
 }
 function modelSelectHTML(c) {
   if (!MODELS_LOADED.has(c.id) && !c.modelsLoading && c.baseUrl) { MODELS_LOADED.add(c.id); loadConnModels(c); }   /* fresh list once per visit */
   const open = S.modelPick === c.id; const good = modelGroups(c);
   const isGood = c.model && (good.rec.includes(c.model) || good.story.includes(c.model));
+  /* the list is the picker: opening it shows every model this key can use straight away. Searching is
+     opt-in, so nothing has to be typed or cleared before the other models appear. */
+  const head = `<div class="mhead"><span class="hint">${arr(c.models).length ? `${arr(c.models).length} models` : 'Models'}</span><span class="mact" id="mact">${S.modelQOpen ? (S.modelQ ? '<button class="link" data-act="modelclear">Show all</button>' : '') : '<button class="link" data-act="modelsearch">Search…</button>'}</span></div>`;
+  const search = S.modelQOpen ? `<input id="modelQ" data-cid="${c.id}" placeholder="Filter by name, or type one this key allows…" value="${esc(S.modelQ || '')}" autocomplete="off">` : '';
   return `<button class="mpick grow ${isGood ? 'good' : ''}" data-act="modelpick" data-id="${c.id}">${c.model ? `${isGood ? '★ ' : ''}${esc(c.model)}` : 'Choose a model…'}<span class="mchev">${open ? '▲' : '▼'}</span></button>`
-    + (open ? `</div><div class="mpanel"><input id="modelQ" data-cid="${c.id}" placeholder="Search, or type any model name…" value="${esc(S.modelQ || '')}" autocomplete="off">${c.preset === 'ollama' ? `<p class="hint mlegend"><b>Story</b> prose &amp; pacing · <b>D&amp;D</b> rules and dice · <b>Companion</b> everyday chat · <b>NSFW</b> uncensored · <b>SFW</b> may refuse explicit scenes</p>` : ''}<div class="mlist" id="mlist">${modelListHTML(c)}</div></div><div class="row" style="margin-top:6px">` : '');
+    + (open ? `</div><div class="mpanel">${head}${search}${c.preset === 'ollama' ? `<p class="hint mlegend"><b>Story</b> prose &amp; pacing · <b>D&amp;D</b> rules and dice · <b>Companion</b> everyday chat · <b>NSFW</b> uncensored · <b>SFW</b> may refuse explicit scenes</p>` : ''}<div class="mlist" id="mlist">${modelListHTML(c)}</div></div><div class="row" style="margin-top:6px">` : '');
 }
-async function loadConnModels(c) {
+async function loadConnModels(c, force = false) {
+  /* the last good list is kept, so opening the picker is instant and still works when the provider
+     is throttled, offline, or refuses the key for a moment */
+  const fresh = arr(c.models).length && Date.now() - (c.modelsAt || 0) < 6 * 3600e3;
+  if (!force && fresh) { refreshConnUI(); return c.models; }
   c.modelsLoading = true;
-  try { const list = await listModels(c); c.modelInfo = list.slice(0, 400).map(m => ({ id: m.id, free: !!m.free })); c.models = list.slice(0, 400).map(m => m.id); }
-  catch { c.models = c.models || []; }
+  try {
+    const list = await listModels(c);
+    c.modelInfo = list.slice(0, 400).map(m => ({ id: m.id, free: !!m.free })); c.models = list.slice(0, 400).map(m => m.id);
+    c.modelsAt = Date.now(); c.modelsErr = '';
+    saveSettings(false);
+  } catch (e) {
+    c.models = c.models || []; c.modelsErr = String(e && e.message || e);
+  }
   c.modelsLoading = false; refreshConnUI();
+  return c.models;
 }
 function helperSelectHTML() {
   const a = activeConn(); const ids = arr(a?.models); const h = S.settings.ai.helperModel || '';
@@ -554,9 +571,10 @@ function connsHTML() {
         <div class="row"><b class="grow">${esc(c.label)}${on ? ' <span class="note gold" style="margin-left:4px">In use</span>' : ''}</b>
           ${!on && connReady(c) ? `<button class="btn sm" data-act="connuse" data-id="${c.id}">Use</button>` : ''}
           <button class="iconbtn sm" data-act="conndel" data-id="${c.id}" aria-label="Remove">${icon('trash')}</button></div>
-        <div class="hint" style="margin:2px 0 6px">${esc(maskKey(c.apiKey))} · ${st}</div>
+        <div class="hint" style="margin:2px 0 6px">${esc(maskKey(c.apiKey))} · ${st}${coolLeft(c) ? ` <span class="note">· cooling ${coolLabel(coolLeft(c))}</span>` : ''}</div>
         <div class="row">${modelSelectHTML(c)}
           <button class="btn sm" data-act="conntest" data-id="${c.id}" ${c.status === 'working' ? 'disabled' : ''}>Test</button>
+          <button class="btn sm ghost" data-act="connverify" data-id="${c.id}" ${c.status === 'working' ? 'disabled' : ''}>Key check</button>
           <button class="btn sm ghost" data-act="connpick" data-id="${c.id}" ${c.status === 'working' ? 'disabled' : ''}>Auto-pick</button></div>
         ${c.preset === 'ollama' || c.preset === 'custom' ? `<label class="f" style="margin-top:8px"><span>AI memory (context length)</span><input type="number" step="1024" min="2048" data-conn="${c.id}" data-field="ctx" value="${esc(c.ctx || PRESETS[c.preset]?.ctx || '')}" placeholder="12288"></label><p class="hint">Must match OLLAMA_CONTEXT_LENGTH on the PC. Bigger remembers more but runs slower.</p>` : ''}</div>`; }).join('')}
     <p class="hint">Pick a model from the list. <b style="color:var(--green)">★ Recommended</b> ones are listed first. ${act && act.preset === 'ollama' ? 'On your own PC: Wayfarer 12B or an uncensored Qwen3.5 9B writes best, and dolphin3 runs the dice and records.' : 'Bigger models (DeepSeek, Llama 70B, Qwen large, Gemini Flash) follow the rules best.'}</p>`;
@@ -574,5 +592,5 @@ const voiceSettingsHTML = () => `${TTS || VOICE.pc ? `${slider('ui.voiceVol', 'V
       <button class="btn sm" data-act="voicetest" style="margin-top:8px">${icon('speaker')} Test voice</button>
       <p class="hint">The narrator reads the story; lines in quotes are spoken by whoever says them. Change any companion's voice in the Party screen. On iPhone, more built-in voices are under Settings → Accessibility → Spoken Content → Voices.</p>` : '<p class="hint">This browser has no built-in voices.</p>'}`;
 const typingSettingsHTML = () => `      <label class="f"><span>When I type plain text, it means</span><select data-bind="ui.typeMode"><option value="say" ${typeMode() === 'say' ? 'selected' : ''}>What my character says (✋ Action button for what they do)</option><option value="act" ${typeMode() === 'act' ? 'selected' : ''}>What my character does (💬 Say button for what they say)</option></select></label>
-      <p class="hint">The buttons above the text box add the marks for you: ✋ Action puts *asterisks* around what you do, 💬 Say puts "quotes" around what you say, and (( )) Talk to GM is for questions or requests outside the story. Select some text first to wrap it.</p>
+      <p class="hint">The buttons above the text box add the marks for you: ✋ Action puts *asterisks* around what you do, 💬 Say puts "quotes" around what you say, 💭 Thought wraps what you think in [[double brackets]] so the GM knows it was never said aloud, and (( )) Talk to GM is for questions or requests outside the story. Select some text first to wrap it.</p>
       ${SR ? '<p class="hint">Tap the microphone next to the text box to speak your action.</p>' : ''}`;

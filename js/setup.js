@@ -113,7 +113,7 @@ function journalHTML() {
   else if (tab === 'quests') body = `<p class="hint">📍 ${esc(c.location || 'Unknown location')}</p>` + (c.quests.length ? c.quests.map((q, i) => `<div class="quest ${q.status}"><div class="grow">${esc(q.title)}</div><button class="pill" data-act="qstatus" data-i="${i}">${q.status}</button><button class="iconbtn sm" data-act="qdel" data-i="${i}">${icon('x')}</button></div>`).join('') : '<p class="empty" style="font-size:18px">No quests yet.</p>')
       + `<div class="row" style="margin-top:12px"><input class="grow" type="text" id="newQuest" placeholder="Add a quest"><button class="btn sm" data-act="qadd">Add</button></div>`;
   else if (tab === 'memory') body = `<p class="hint">Facts the GM always keeps in mind. Edit freely (one per line).</p><label class="f"><span>Long-term memory</span><textarea rows="12" data-cbind="memory" data-list="1">${esc(c.memory.join('\n'))}</textarea></label>`;
-  else if (tab === 'story') body = `<div class="row" style="margin-top:6px"><button class="btn sm" data-act="recap">${icon('book')} "Previously on…" recap</button><button class="btn sm" data-act="fixopen">${icon('spark')} Fix the story</button></div><p class="hint">Older turns are condensed here so the GM stays consistent on long campaigns.</p><label class="f"><span>Summary</span><textarea rows="14" data-cbind="summary">${esc(c.summary || '')}</textarea></label>`;
+  else if (tab === 'story') body = `<div class="row" style="margin-top:6px"><button class="btn sm" data-act="recap">${icon('book')} "Previously on…" recap</button><button class="btn sm" data-act="fixopen">${icon('spark')} Fix the story</button><button class="btn sm ghost" data-act="bookexport">${icon('scroll')} Save as a book</button></div><p class="hint">Older turns are condensed here so the GM stays consistent on long campaigns.</p><label class="f"><span>Summary</span><textarea rows="14" data-cbind="summary">${esc(c.summary || '')}</textarea></label>`;
   else {
     const cf = (path, label, rows = 0) => rows ? `<label class="f"><span>${label}</span><textarea rows="${rows}" data-cbind="${path}">${esc(getPath(c, path) || '')}</textarea></label>` : `<label class="f"><span>${label}</span><input type="text" data-cbind="${path}" value="${esc(getPath(c, path) || '')}"></label>`;
     body = cf('title', 'Title') + cf('genre', 'Genre / setting') + cf('premise', 'Premise', 5) + cf('tone', 'Tone')
@@ -204,8 +204,10 @@ const KEY_PATTERNS = [
   ['gemini', /AIza[0-9A-Za-z_-]{30,}/],
   ['gemini', /\bAQ\.[0-9A-Za-z_-]{30,}/],
   ['groq', /\bgsk_[A-Za-z0-9]{20,}/],
-  /* Mistral doesn't publish a prefix: a bare key is 32 letters/digits, and some
-     copies carry a mistral- prefix. Labeled pastes work either way. */
+  /* Mistral doesn't document a prefix, and the shape has changed over time: a bare key is 32
+     letters/digits, newer Studio keys look like mstrl_… with dashes and underscores, and some
+     copies carry a mistral- prefix. Labeled pastes work whatever the shape. */
+  ['mistral', /\bmstrl_[A-Za-z0-9_-]{16,}\b/],
   ['mistral', /\bmistral-[A-Za-z0-9_-]{20,}\b/],
   ['mistral', /\b[A-Za-z0-9]{32}\b/]
 ];
@@ -311,6 +313,32 @@ function modelCandidates(conn, list) {
   return ids;
 }
 function pickModel(conn, list) { return modelCandidates(conn, list)[0] || ''; }
+/* "Key check": say exactly what the provider answered, instead of only whether a chat reply came back */
+async function verifyConn(conn) {
+  conn.status = 'working'; conn.note = 'Checking the key…'; refreshConnUI();
+  try {
+    const list = await listModels(conn);
+    conn.models = list.slice(0, 400).map(m => m.id); conn.modelInfo = list.slice(0, 400).map(m => ({ id: m.id, free: !!m.free })); conn.modelsAt = Date.now(); conn.modelsErr = '';
+    conn.status = 'ok'; conn.note = `${list.length} model${list.length === 1 ? '' : 's'} available`;
+    saveSettings(false);
+    toast(`${conn.label}: the key works — ${list.length} model${list.length === 1 ? '' : 's'} available.`, 5000);
+  } catch (e) {
+    conn.status = 'error'; conn.note = keyHint(e, conn);
+    toast(`${conn.label}: ${conn.note}`, 8000);
+  }
+  refreshConnUI();
+}
+function keyHint(e, conn) {
+  const m = String(e && e.message || e);
+  const s = Number(e && e.status) || Number((m.match(/HTTP (\d{3})/) || [])[1]) || 0;
+  if (s === 401 || s === 403) return `Key rejected (HTTP ${s}). Copy it again from the provider page — no spaces, quotes or “Bearer”.`;
+  if (s === 402) return 'That account has no credit right now (HTTP 402). Add a payment method, or use a free model.';
+  if (s === 404) return 'The API address is wrong (HTTP 404). Check the base address for this provider.';
+  if (s === 429) return 'Rate limited (HTTP 429). The key is fine — wait a minute and check again.';
+  if (s >= 500) return `The provider is down (HTTP ${s}). Try again later.`;
+  if (/failed to fetch|networkerror|load failed|network request failed/i.test(m)) return 'The browser could not reach the provider (blocked network or CORS), so the key was never tried.';
+  return m;
+}
 async function testConn(conn) {
   if (!conn.model) throw new Error('No model chosen.');
   const ctl = new AbortController(); const tm = setTimeout(() => ctl.abort(), conn.preset === 'ollama' ? 120000 : 60000);

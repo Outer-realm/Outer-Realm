@@ -145,8 +145,15 @@ input:focus,textarea:focus,select:focus{border-color:var(--accent) !important;ou
 .hbtn span{font-family:var(--mono);text-transform:uppercase;letter-spacing:.04em;font-size:10px}
 .dock{background:rgba(12,13,34,.94);border-top-color:var(--line)}
 .log{max-width:860px;margin:0 auto;width:100%}
-.msg.gm .narr{font-family:var(--ui);line-height:1.7;color:#f1efff}
+/* story prose is a soft green so it reads as narration, not as the player's own white speech */
+.msg.gm .narr{font-family:var(--ui);line-height:1.7;color:#b3ddc4}
 .msg.gm .narr strong{color:#fff}
+/* ---------- accessibility: keyboard focus, and less motion when the OS asks for it ---------- */
+:focus-visible{outline:2px solid var(--gem,#f3c96b);outline-offset:2px}
+@media (prefers-reduced-motion:reduce){
+  *,*::before,*::after{animation-duration:.001ms !important;animation-iteration-count:1 !important;transition-duration:.001ms !important;scroll-behavior:auto !important}
+  .spin{animation:none !important}
+}
 .msg.player .b{background:#262563;border-color:#3b3a8a}
 .scene{border-radius:16px}
 .hud .hs b,.hud .gold{color:var(--gem)}
@@ -239,13 +246,14 @@ a.btn{text-decoration:none;color:var(--ink);display:inline-flex;align-items:cent
 .fmtbtn{border:1px solid var(--line);background:var(--panel2);color:var(--ink);border-radius:10px;padding:6px 10px;font-size:13px;font-weight:600}
 .fmtbtn:hover{border-color:var(--accent)}
 .fmthint{color:var(--muted);font-size:12px;margin-left:auto}
-/* marked-up text: actions are red, inner thoughts yellow, plain speech stays the normal ink */
+/* marked-up text: actions red, inner thoughts blue, directions to the AI yellow, plain speech ink */
 em.act{color:var(--red);font-style:italic}
-em.think{color:var(--gem);font-style:italic}
+em.think{color:var(--blue);font-style:italic}
 .pmsg.me .bub em.act{color:#ffd9de}
-.pmsg.me .bub em.think{color:#ffeab5}
+.pmsg.me .bub em.think{color:#a8d4ff}
 .msg.player .b .tact{color:var(--red);font-style:italic}
-.msg.player .b .tooc{color:var(--muted);font-size:.9em}
+.msg.player .b .tooc{color:var(--gem);font-size:.9em}
+.msg.gm .narr .tooc{color:var(--gem);font-style:italic}
 @media(max-width:560px){.fmthint{display:none}}
 
 /* Game Settings */
@@ -284,6 +292,8 @@ em.think{color:var(--gem);font-style:italic}
 .mpick .mchev{margin-left:auto;color:var(--muted);font-size:11px;flex:none}
 .mpanel{margin-top:6px;border:1px solid var(--line);border-radius:12px;background:var(--panel);padding:8px}
 .mpanel input{width:100%;margin-bottom:6px}
+.mpanel .mhead{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:0 2px 6px}
+.mpanel .mhead .hint{margin:0}
 .mlist{max-height:300px;overflow-y:auto;display:flex;flex-direction:column;gap:2px}
 .mgrp{font-size:11px;letter-spacing:.05em;text-transform:uppercase;color:var(--muted);padding:8px 6px 4px}
 .mrow{display:flex;flex-wrap:wrap;align-items:center;gap:8px;text-align:left;border:none;background:none;color:var(--ink);padding:10px 8px;border-radius:8px;font-size:14px;word-break:break-all}

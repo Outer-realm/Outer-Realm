@@ -6,6 +6,7 @@
      act mode:           plain text = what my character does,
                          "text in quotes" = what my character says
      both:               (( double parentheses )) = out of character, to the GM
+     any mode:           [[ double square brackets ]] = an inner thought
    The composer's buttons insert the marks. Each message is turned into a clear
    "X says / X does / to the GM" form for the AI, so it never mixes them up.
    ========================================================================= */
@@ -21,10 +22,10 @@ function turnTraits(c, text) {
 function parseTurn(text, mode = 'act') {
   const parts = []; const s = String(text || '').replace(TRAIT_TAG, ' ');
   const add = (k, t) => { t = String(t || '').replace(/\s+/g, ' ').trim(); if (!t || !/[\p{L}\p{N}]/u.test(t)) return; const p = parts[parts.length - 1]; if (p && p.k === k) p.t += ' ' + t; else parts.push({ k, t }); };
-  const re = /\(\(([\s\S]*?)\)\)|\*([^*\n]+)\*|[“"]([^”"]+)[”"]/g; let i = 0, m;
+  const re = /\[\[([\s\S]*?)\]\]|\(\(([\s\S]*?)\)\)|\*([^*\n]+)\*|[“"]([^”"]+)[”"]/g; let i = 0, m;
   while ((m = re.exec(s))) {
     add(mode === 'say' ? 'say' : 'act', s.slice(i, m.index));
-    if (m[1] !== undefined) add('ooc', m[1]); else if (m[2] !== undefined) add('act', m[2]); else add('say', m[3]);
+    if (m[1] !== undefined) add('think', m[1]); else if (m[2] !== undefined) add('ooc', m[2]); else if (m[3] !== undefined) add('act', m[3]); else add('say', m[4]);
     i = re.lastIndex;
   }
   add(mode === 'say' ? 'say' : 'act', s.slice(i));
@@ -44,17 +45,17 @@ function turnBody(c, text, mode, n) {
   if (parts.every(p => p.k === 'ooc')) return `(( ${parts.map(p => p.t).join(' ')} ))`;
   if (parts.every(p => p.k === 'act')) return parts.map(p => p.t).join(' ');
   if (isCompanion(c) && parts.every(p => p.k === 'say')) return parts.map(p => p.t).join(' ');
-  return parts.map(p => p.k === 'say' ? `${n} says: "${p.t}"` : p.k === 'act' ? `${n} does: ${p.t}` : `(( out of character, to you the GM: ${p.t} ))`).join('\n');
+  return parts.map(p => p.k === 'say' ? `${n} says: "${p.t}"` : p.k === 'act' ? `${n} does: ${p.t}` : p.k === 'think' ? `${n} thinks to themselves: ${p.t}` : `(( out of character, to you the GM: ${p.t} ))`).join('\n');
 }
 /* how the message looks in the story */
 function turnHTML(text, mode = 'act') {
   const tags = [...String(text || '').matchAll(TRAIT_TAG)].map(m => `<span class="ttrait">✦ ${esc(m[1])}</span>`).join(' ');
-  return (tags ? tags + ' ' : '') + parseTurn(text, mode).map(p => p.k === 'act' ? `<em class="tact">${esc(p.t)}</em>` : p.k === 'ooc' ? `<span class="tooc">(( ${esc(p.t)} ))</span>` : `<span class="tsay">${mode === 'act' ? '“' + esc(p.t) + '”' : esc(p.t)}</span>`).join(' ');
+  return (tags ? tags + ' ' : '') + parseTurn(text, mode).map(p => p.k === 'act' ? `<em class="tact">${esc(p.t)}</em>` : p.k === 'ooc' ? `<span class="tooc">(( ${esc(p.t)} ))</span>` : p.k === 'think' ? `<em class="think">[[ ${esc(p.t)} ]]</em>` : `<span class="tsay">${mode === 'act' ? '“' + esc(p.t) + '”' : esc(p.t)}</span>`).join(' ');
 }
 /* composer buttons: wrap the selection, or drop in the marks with the cursor between them */
 function fmtInsert(k) {
   const el = $('#input'); if (!el) return;
-  const [a, b] = k === 'act' ? ['*', '*'] : k === 'ooc' ? ['(( ', ' ))'] : ['"', '"'];
+  const [a, b] = k === 'act' ? ['*', '*'] : k === 'think' ? ['[[', ']]'] : k === 'ooc' ? ['(( ', ' ))'] : ['"', '"'];
   const s = el.selectionStart ?? el.value.length, e = el.selectionEnd ?? s, v = el.value, sel = v.slice(s, e);
   const lead = s > 0 && !/\s$/.test(v.slice(0, s)) ? ' ' : '';
   el.value = v.slice(0, s) + lead + a + sel + b + v.slice(e);
@@ -67,6 +68,7 @@ function fmtBarHTML(c) {
   return `<div class="fmtbar">
     <button class="fmtbtn" data-act="fmt" data-k="act" title="What your character does">✋ Action</button>
     ${say ? '' : '<button class="fmtbtn" data-act="fmt" data-k="say" title="What your character says">💬 Say</button>'}
+    <button class="fmtbtn" data-act="fmt" data-k="think" title="What your character thinks but does not say">💭 Thought</button>
     <button class="fmtbtn" data-act="fmt" data-k="ooc" title="Out of character, to the GM">(( )) Talk to GM</button>
     ${!isCompanion(c) && arr(c.character?.traits).length ? `<button class="fmtbtn ${S.drawer === 'traits' ? 'on' : ''}" data-act="drawer" data-k="traits" title="Use one of your traits in this turn">✦ Trait</button>` : ''}
     ${!isCompanion(c) ? `<button class="fmtbtn ${S.drawer === 'gear' ? 'on' : ''}" data-act="drawer" data-k="gear" title="Check your gear without leaving the text box">🎒 Gear</button>` : ''}

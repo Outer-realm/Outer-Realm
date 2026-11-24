@@ -136,8 +136,11 @@ document.addEventListener('click', e => {
     case 'gset': setPath(S.settings, el.dataset.path, JSON.parse(el.dataset.v)); saveSettings(); musicScene(cur()); musicLevel(); renderModal(); break;
     case 'musicskip': musicSkip(); break;
     case 'cidreset': S.settings.drive.clientId = DEFAULT_CLIENT_ID; saveSettings(); renderModal(); toast('Client ID fixed. Tap Connect & sync.'); break;
-    case 'modelpick': S.modelPick = S.modelPick === el.dataset.id ? null : el.dataset.id; S.modelQ = ''; refreshConnUI(); break;
-    case 'modelset': { const cn = conns().find(x => x.id === el.dataset.id); if (cn && el.dataset.m) { cn.model = el.dataset.m.trim(); cn.status = ''; cn.note = ''; S.modelPick = null; S.modelQ = ''; saveSettings(); setupConn(cn); } break; }
+    case 'modelpick': S.modelPick = S.modelPick === el.dataset.id ? null : el.dataset.id; S.modelQ = ''; S.modelQOpen = false; refreshConnUI(); break;
+    case 'modelset': { const cn = conns().find(x => x.id === el.dataset.id); if (cn && el.dataset.m) { cn.model = el.dataset.m.trim(); cn.status = ''; cn.note = ''; S.modelPick = null; S.modelQ = ''; S.modelQOpen = false; saveSettings(); setupConn(cn); } break; }
+    /* the filter is opt-in: the picker lists every model until you ask to narrow it down */
+    case 'modelsearch': S.modelQOpen = true; refreshConnUI(); setTimeout(() => $('#modelQ')?.focus(), 40); break;
+    case 'modelclear': S.modelQ = ''; refreshConnUI(); setTimeout(() => $('#modelQ')?.focus(), 40); break;
     case 'modellist': { const cn = conns().find(x => x.id === el.dataset.id); if (cn) { cn.typing = false; refreshConnUI(); } break; }
     case 'helpersame': S.settings.ai.helperAuto = 'off'; S.settings.ai.helperModel = ''; saveSettings(); renderModal(); toast('Your story model now does every step. Turns should start faster.'); break;
     case 'tab': S.modalTab = el.dataset.id; S.models = null; renderModal(); $('#modalBody').scrollTop = 0; break;
@@ -204,6 +207,9 @@ document.addEventListener('click', e => {
     case 'conndel': { const c0 = conns().find(x => x.id === el.dataset.id); if (!c0 || !confirm(`Remove ${c0.label} (${maskKey(c0.apiKey)}) from this device?`)) break;
       S.settings.ai.conns = conns().filter(x => x !== c0); if (S.settings.ai.active === c0.id) S.settings.ai.active = (conns().find(connReady) || conns()[0] || {}).id || ''; saveSettings(); Vault.schedule(); refreshConnUI(); break; }
     case 'conntest': { const c0 = conns().find(x => x.id === el.dataset.id); if (c0) setupConn(c0); break; }
+    case 'connverify': { const c0 = conns().find(x => x.id === el.dataset.id); if (c0) verifyConn(c0); break; }
+    case 'gmcont': gmContinue(el.dataset.id); break;
+    case 'bookexport': exportStorybook(); break;
     case 'connpick': { const c0 = conns().find(x => x.id === el.dataset.id); if (c0) setupConn(c0, { repick: true }); break; }
     case 'connretry': S.settings.ai.active = el.dataset.id; saveSettings(); c.messages = c.messages.filter(m => m.role !== 'err'); gmTurn(); break;
     case 'testimg': testImage(); break;
@@ -313,7 +319,8 @@ document.addEventListener('input', e => {
     touch(c); renderHUD(); scheduleSync();
     if ((el.tagName === 'SELECT' || el.type === 'checkbox') && S.modal) renderModal();
   } else if (el.id === 'rollHow') { const r = cur()?.pendingRoll; if (r) { r.how = el.value.slice(0, 400); touch(cur()); } }
-  else if (el.id === 'modelQ') { S.modelQ = el.value; const c2 = conns().find(x => x.id === el.dataset.cid); const l = $('#mlist'); if (c2 && l) l.innerHTML = modelListHTML(c2); }
+  else if (el.id === 'modelQ') { S.modelQ = el.value; const c2 = conns().find(x => x.id === el.dataset.cid); const l = $('#mlist'); if (c2 && l) l.innerHTML = modelListHTML(c2);
+    const a = $('#mact'); if (a) a.innerHTML = S.modelQ ? '<button class="link" data-act="modelclear">Show all</button>' : ''; }
   else if (el.id === 'input') autoGrow(el);
   else if (el.id === 'askText') S.askDraft = el.value;
   else if (el.dataset.pedit) { const p = arr(cur()?.party).find(x => x.id === el.dataset.pedit); if (p) { p[el.dataset.k] = el.type === 'checkbox' ? el.checked : el.value; touch(cur()); if (el.type === 'checkbox' && S.modal) renderModal(); } }
