@@ -18,7 +18,7 @@ if not errorlevel 1 (
   echo.
   echo Port 7861 is already in use. Either the picture helper is already running
   echo in another window, or a second copy of Forge took it.
-  echo Check http://localhost:7861/iq/health - if it shows "helper": 2 you're fine.
+  echo Check http://localhost:7861/iq/health - if it shows "helper": 4 you're fine.
   echo If it shows "Not Found", restart the PC.
   echo.
   pause
