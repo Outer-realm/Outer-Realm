@@ -6,3 +6,6 @@ Thumbs.db
 *-keys*.json
 .freebuff/
 .cloud-attachments/
+
+# Local Netlify folder
+.netlify
