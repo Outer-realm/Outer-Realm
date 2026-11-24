@@ -96,10 +96,11 @@ function physHTML(D) {
   const v = k => String(x[k] || '');
   const f = (k, label, ph) => `<label class="f"><span>${label}</span><input data-ph="${k}" maxlength="${PHYS_MAX}" value="${esc(v(k))}" placeholder="${esc(ph)}"></label>`;
   const ta = (k, label, ph, rows = 2) => `<label class="f"><span>${label}</span><textarea data-ph="${k}" maxlength="${PHYS_MAX}" rows="${rows}" placeholder="${esc(ph)}">${esc(v(k))}</textarea></label>`;
-  return `<details class="physpanel" ${S.palPhysOpen ? 'open' : ''}>
+  /* the AI button sits above the panel, not inside it, so it is still in reach while the answers are collapsed */
+  return `<div class="row wrap" style="margin:10px 0 4px"><button class="btn sm ghost" data-act="palbphysai" ${S.palPhysBusy ? 'disabled' : ''}>${S.palPhysBusy ? '<span class="spin sm"></span> Writing…' : icon('spark') + ' Fill the detailed description with AI'}</button><span class="hint" style="margin:0">Fills the answers you left empty. Everything you wrote is kept.</span></div>
+    <details class="physpanel" ${S.palPhysOpen ? 'open' : ''}>
       <summary><b>Detailed physical description</b> <span class="hint" style="margin:0">${physNote(D)}</span></summary>
       <p class="hint">Her body, face and hair only. These answers join her permanent look, so every picture (and the chat's own description of her) starts from them. Clothes and poses are never saved here: those still come from the chat or from the picture prompt. Your Locked tags box is added separately. Keep each answer to a phrase (up to ${PHYS_MAX} characters); use the Face and Body boxes above for anything longer.</p>
-      <div class="row wrap" style="margin:8px 0 2px"><button class="btn sm ghost" data-act="palbphysai" ${S.palPhysBusy ? 'disabled' : ''}>${S.palPhysBusy ? '<span class="spin sm"></span> Writing…' : icon('spark') + ' Fill this section with AI'}</button><span class="hint" style="margin:0">Fills the answers you left empty. Everything you wrote is kept.</span></div>
       <div class="sect" style="font-size:16px">Body</div>
       <div class="kv">${f('height', 'Height', '168 cm (5 ft 6 in)')}${f('weight', 'Weight, or just her build', '59 kg, or slim / curvy / athletic')}</div>
       ${ta('build', 'Build: frame, shoulders, waist, hips, legs', 'small frame, narrow shoulders, wide hips, long legs')}
