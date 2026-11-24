@@ -9,28 +9,36 @@
 #                One-time install: run this file with --install-voices (Install voices.bat does that).
 #   5. VRAM:     /iq/bump (POST {ollama, forge}) -> unloads Ollama's loaded models and Forge's painting
 #                checkpoint from the graphics card when replies or pictures are crawling.
+#   6. Restart:  /iq/restart (POST, X-Ironquill-Token) -> closes Forge and starts it again, which hands the
+#                whole graphics card back. /iq/status says whether Forge is up, starting or down.
 # Only the Ironquill website and pages on this PC are allowed to use it.
-import os, html, io, threading, wave
+import os, html, io, threading, time, wave
 import html.parser
 import ipaddress
 import json
 import re
+import secrets
 import socket
 import socketserver
+import subprocess
 import sys
 import http.server
 import urllib.error
 import urllib.parse
 import urllib.request
 
+VERSION = 5
 FORGE = 'http://127.0.0.1:7860'
 OLLAMA = 'http://127.0.0.1:11434'
 SEARXNG = 'http://127.0.0.1:8888'
 PORT = 7861
+BASE = os.path.dirname(os.path.abspath(__file__))
+# Forge's own launcher: two folders up, next to the webui folder this helper lives in
+FORGE_START = os.path.normpath(os.path.join(BASE, '..', '..', 'start-forge.bat'))
 ALLOWED = {'https://ironquillstories.netlify.app', 'https://outer-realm.netlify.app'}
 # Extra web addresses allowed to use this helper: one per line in allowed-sites.txt next to this file
 try:
-    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'allowed-sites.txt'), encoding='utf-8') as f:
+    with open(os.path.join(BASE, 'allowed-sites.txt'), encoding='utf-8') as f:
         ALLOWED |= {l.strip().rstrip('/') for l in f if l.strip().startswith('https://')}
 except OSError:
     pass
@@ -39,7 +47,7 @@ MAX_PAGE = 2_500_000   # bytes read from any one web page
 MAX_TEXT = 16000       # characters of readable text returned
 
 # ---------- voices (Kokoro) ----------
-HERE = os.path.dirname(os.path.abspath(__file__))
+HERE = BASE
 VOICE_DIR = os.path.join(HERE, 'voice')
 VOICE_LIB = os.path.join(VOICE_DIR, 'lib')      # kept apart so it never touches Forge's own packages
 VOICE_MODEL = os.path.join(VOICE_DIR, 'kokoro-v1.0.onnx')
@@ -272,6 +280,133 @@ def forge_unload():
         return 'not running'
 
 
+# ---------------- restarting Forge (a real reset of the graphics card) ----------------
+def forge_alive(timeout=2):
+    """Is Forge answering right now? A short timeout keeps a status poll quick."""
+    try:
+        st, _, _ = fetch(FORGE + '/sdapi/v1/sd-models', timeout=timeout)
+        return st == 200
+    except Exception:
+        return False
+
+
+def load_token():
+    """The restart token lives in a file so it survives restarts. The old bridge's file is reused when it is
+    there, so a device that already has that token pasted in keeps working; otherwise one is made here."""
+    for path in (os.path.normpath(os.path.join(BASE, '..', '..', 'iq-bridge-token.txt')),
+                 os.path.join(BASE, 'iq-restart-token.txt')):
+        try:
+            with open(path, encoding='utf-8') as f:
+                t = f.read().strip()
+            if t:
+                return t, path
+        except OSError:
+            pass
+    t = secrets.token_urlsafe(18)
+    path = os.path.join(BASE, 'iq-restart-token.txt')
+    try:
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(t + '\n')
+    except OSError:
+        pass
+    return t, path
+
+
+TOKEN, TOKEN_PATH = load_token()
+ENGINE = {'since': None, 'restarts': 0, 'last_up': None, 'reason': ''}
+ENGINE_LOCK = threading.Lock()
+BOOT_TIMEOUT = 240          # how long a fresh Forge may take before the app stops watching
+# Forge runs as python launch.py; this helper is a different python process and is left alone.
+FORGE_FILTER = ("Get-CimInstance Win32_Process -Filter \"name='python.exe'\" | "
+                "Where-Object { $_.CommandLine -match 'launch\\.py' }")
+KILL_FORGE = FORGE_FILTER + " | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+FORGE_PIDS = FORGE_FILTER + " | ForEach-Object { $_.ProcessId }"
+NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+
+
+def powershell(script, timeout=25):
+    try:
+        out = subprocess.run(['powershell', '-NoProfile', '-NonInteractive', '-Command', script], timeout=timeout,
+                             capture_output=True, text=True, creationflags=NO_WINDOW)
+        return out.stdout or ''
+    except Exception as e:
+        print('  powershell failed: %s' % e)
+        return ''
+
+
+def forge_pids():
+    """The pids of Forge itself (python launch.py)."""
+    return [int(x) for x in re.findall(r'\d+', powershell(FORGE_PIDS)) if int(x) > 4]
+
+
+def stop_forge():
+    """Close Forge's own window, so its process really goes and the card is handed back. This also catches a
+    Forge that is still starting up: waiting for the port to stop answering would leave two of them fighting
+    over it, and the loser keeps a slice of the graphics card."""
+    for _ in range(25):
+        if not forge_pids():
+            return not forge_alive(1)
+        powershell(KILL_FORGE)
+        time.sleep(2)
+    print('  Forge would not close (pids %s).' % forge_pids())
+    return False
+
+
+def start_forge():
+    """Start Forge the way start-forge.bat does (its API and CORS flags live in that file).
+    The bat gets its own minimised console: Forge prints its progress there, and closing that window
+    stops Forge. (A detached `cmd /c start` has no console to open a window on, so it silently did
+    nothing on this PC.)"""
+    if not os.path.isfile(FORGE_START):
+        print('  %s is missing, so Forge cannot be started.' % FORGE_START)
+        return False
+    if forge_pids():
+        print('  a copy of Forge is already starting; not starting a second one.')
+        return True
+    info = subprocess.STARTUPINFO()
+    info.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    info.wShowWindow = 7          # SW_SHOWMINNOACTIVE: start minimised, don't steal the focus
+    try:
+        subprocess.Popen([os.environ.get('COMSPEC') or 'cmd.exe', '/c', FORGE_START], cwd=BASE,
+                         creationflags=getattr(subprocess, 'CREATE_NEW_CONSOLE', 0), startupinfo=info, close_fds=True)
+        return True
+    except Exception as e:
+        print('  could not start Forge: %s' % e)
+        return False
+
+
+def restart_engine(reason='app'):
+    """Close Forge and start it again in the background. A fresh process gives the card back even when
+    unloading the model alone leaves it bogged down. Returns False if a restart is already running."""
+    with ENGINE_LOCK:
+        if ENGINE['since'] is not None and time.time() - ENGINE['since'] < 20:
+            return False
+        ENGINE['since'] = time.time()
+        ENGINE['reason'] = reason
+        ENGINE['restarts'] += 1
+        t0 = ENGINE['since']
+    threading.Thread(target=_restart_engine, args=(t0, reason), daemon=True).start()
+    return True
+
+
+def _restart_engine(t0, reason):
+    print('  restarting Forge (%s): closing it, then starting it again...' % reason)
+    stop_forge()
+    time.sleep(2)          # the killed process needs a moment to let go of port 7860
+    start_forge()
+    while time.time() - t0 < BOOT_TIMEOUT:
+        if forge_alive(2):
+            with ENGINE_LOCK:
+                ENGINE['since'] = None
+                ENGINE['last_up'] = time.time()
+            print('  Forge is back after %d seconds.' % (time.time() - t0))
+            return
+        time.sleep(3)
+    with ENGINE_LOCK:
+        ENGINE['since'] = None
+    print('  Forge did not come back after %d seconds; look at the Forge window.' % BOOT_TIMEOUT)
+
+
 # ---------------- page reading ----------------
 SKIP = {'script', 'style', 'noscript', 'svg', 'nav', 'header', 'footer', 'aside', 'form', 'button', 'select', 'iframe', 'figure', 'sup', 'table'}
 BLOCK = {'p', 'div', 'br', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'tr', 'section', 'article', 'blockquote', 'dd', 'dt'}
@@ -381,7 +516,29 @@ class Helper(http.server.BaseHTTPRequestHandler):
         u = urllib.parse.urlparse(self.path)
         q = urllib.parse.parse_qs(u.query)
         if u.path == '/iq/health':
-            return self.reply(200, {'ok': True, 'helper': 4, 'forge': forge_up(), 'searxng': searxng_up(), 'tts': voices_installed()})
+            return self.reply(200, {'ok': True, 'helper': VERSION, 'forge': forge_up(), 'searxng': searxng_up(),
+                                    'tts': voices_installed(), 'restart': bool(TOKEN)})
+        if u.path == '/iq/status':
+            up = forge_alive(2)
+            with ENGINE_LOCK:
+                since = ENGINE['since']
+                restarts, last_up, reason = ENGINE['restarts'], ENGINE['last_up'], ENGINE['reason']
+            starting = since is not None and time.time() - since < BOOT_TIMEOUT
+            return self.reply(200, {'ok': True, 'helper': VERSION, 'bridge': VERSION, 'forge': up,
+                                    'state': 'up' if up else ('starting' if starting else 'down'),
+                                    'restarting': starting, 'since': since, 'restarts': restarts,
+                                    'lastUp': last_up, 'reason': reason, 'tokenSet': bool(TOKEN)})
+        if u.path == '/iq/restart':
+            if self.command != 'POST':
+                return self.reply(405, {'ok': False, 'error': 'POST only'})
+            got = (self.headers.get('X-Ironquill-Token') or '').strip()
+            if not TOKEN or not got or not secrets.compare_digest(got, TOKEN):
+                return self.reply(403, {'ok': False, 'error': 'restart token missing or wrong'})
+            if not os.path.isfile(FORGE_START):
+                return self.reply(500, {'ok': False, 'error': 'start-forge.bat is missing next to the helper'})
+            if not restart_engine('app'):
+                return self.reply(409, {'ok': False, 'error': 'a restart is already running'})
+            return self.reply(202, {'ok': True, 'started': True})
         if u.path == '/iq/tts' and self.command == 'POST':
             try:
                 length = int(self.headers.get('Content-Length') or 0)
@@ -477,11 +634,13 @@ if __name__ == '__main__':
     except OSError as e:
         print('Could not start the helper on port %d (%s). Is it already running in another window?' % (PORT, e))
         sys.exit(1)
-    print('Outer Realm helper is running (pictures, research and voices).')
+    print('Outer Realm helper v%d is running (pictures, research, voices, VRAM freeing, restart).' % VERSION)
     print('  Ironquill (this PC):  http://localhost:%d' % PORT)
     print('  Pictures:             %s (Forge) %s' % (FORGE, 'found' if forge_up() else '- not running yet'))
     print('  Web search:           %s' % ('SearXNG at ' + SEARXNG if searxng_up() else 'DuckDuckGo (SearXNG not running), Wikipedia as backup'))
     print('  Voices:               %s' % ('ready (Kokoro)' if voices_installed() else 'not installed (run Install voices.bat for natural voices)'))
+    print('  Restart token:        %s' % TOKEN)
+    print('  (Paste that token once into Outer Realm, Settings > Images, to restart Forge from your phone.)')
     print('Keep this window open (minimize it). Close it to stop the helper.')
     if voices_installed():
         threading.Thread(target=kokoro, daemon=True).start()   # warm up so the first line is quick

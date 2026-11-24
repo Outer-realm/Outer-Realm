@@ -123,8 +123,9 @@ const forgeUrl = () => String(LS.get('iq.forgeUrl', '') || 'http://localhost:786
 /* Forge names a loaded checkpoint without the "[hash]" its model list adds, so compare the plain file name */
 const sameForgeModel = (a, b) => String(a || '').replace(/\s*\[[^\]]*\]$/, '').trim().toLowerCase() === String(b || '').replace(/\s*\[[^\]]*\]$/, '').trim().toLowerCase();
 /* ---------- restarting the picture engine from another device (phone) ----------
-   The bridge on the PC takes a token-guarded POST /iq/restart, then answers /iq/status until Forge is
-   back. The token stays on this device only: it is never written into the synced settings file. */
+   The helper on the PC takes a token-guarded POST /iq/restart (it closes Forge and starts it again, which
+   hands the whole graphics card back), then answers /iq/status until Forge is up. The token stays on this
+   device only: it is never written into the synced settings file. */
 const bridgeToken = () => String(LS.get('iq.bridgeToken', '') || '').trim();
 let enginePoll = null;
 let engineRecoveredAt = 0;   /* only announce a bridge-recovered picture once a minute */
@@ -148,16 +149,17 @@ function engineStatus(msg) {
 }
 async function restartEngine() {
   const token = bridgeToken();
-  if (!token) { engineStatus('Paste the restart token first — the bridge window on the PC prints it.'); return; }
+  if (!token) { engineStatus('Paste the restart token first — the picture helper window on the PC prints it.'); return; }
   if (enginePoll) { clearInterval(enginePoll); enginePoll = null; }
   engineStatus('Asking the PC to close and start Forge again…');
   try {
     const r = await fetch(forgeUrl() + '/iq/restart', { method: 'POST', headers: { 'X-Ironquill-Token': token }, signal: AbortSignal.timeout ? AbortSignal.timeout(10000) : undefined });
-    if (r.status === 403) { engineStatus('That token was refused. Copy it again from the bridge window.'); return; }
+    if (r.status === 403) { engineStatus('That token was refused. Copy it again from the helper window.'); return; }
+    if (r.status === 404) { engineStatus('The helper on the PC is out of date. Close its window and run Start Outer Realm.bat, then try again.'); return; }
     const j = await r.json().catch(() => ({}));
-    if (!r.ok || !j.ok) { engineStatus('The bridge said: ' + (j.error || ('HTTP ' + r.status))); return; }
+    if (!r.ok || !j.ok) { engineStatus('The helper said: ' + (j.error || ('HTTP ' + r.status))); return; }
   } catch {
-    engineStatus("Couldn't reach the bridge. Is it running on the PC?");
+    engineStatus("Couldn't reach the picture helper. Is it running on the PC?");
     return;
   }
   const t0 = Date.now();
@@ -472,9 +474,8 @@ function forgeSettingsHTML() {
     <div class="row"><button class="btn sm gold" data-act="forgefind">Find it &amp; load models</button><button class="btn sm" data-act="enginerestart">Restart Forge</button></div>
     ${S.forgeStatus ? `<p class="hint">${esc(S.forgeStatus)}</p>` : ''}
     <p class="hint" id="engineStatus">${esc(S.engineStatus || '')}</p>
-    <label class="f"><span>Restart token (printed in the bridge window on the PC)</span><input type="text" id="bridgeTokenIn" value="${esc(LS.get('iq.bridgeToken', ''))}" placeholder="paste it once on this device" autocomplete="off"></label>
-    <p class="hint"><b>Restart Forge</b> tells the bridge to close Forge and the bridge, start both again, and keeps checking until Forge answers — so it works from your phone too. Paste the token once on each device; it is not saved in the synced settings file.</p>
-    <p class="hint">While the bridge is running it also watches Forge: if Forge crashes or is closed, the bridge starts it again and finishes the picture that was interrupted once. A notice appears here and in the app when that happens.</p>
+    <label class="f"><span>Restart token (printed in the picture helper window on the PC)</span><input type="text" id="bridgeTokenIn" value="${esc(LS.get('iq.bridgeToken', ''))}" placeholder="paste it once on this device" autocomplete="off"></label>
+    <p class="hint"><b>Restart Forge</b> asks the picture helper to close Forge and start it again, then keeps checking until Forge answers ("✓ Back up after 42 s") — so it works from your phone too. Use it when the card stays bogged down: a fresh Forge gives all of the graphics memory back, where freeing it can leave some behind. Paste the token once on each device; it is not saved in the synced settings file.</p>
         ${(() => { const all = [...new Set([...models, picCheckpoint(), im.forgeModelSfw, im.forgeModelNsfw].filter(Boolean))];
       const opts = all.map(m => `<option value="${esc(m)}" ${picCheckpoint() === m ? 'selected' : ''}>${esc(checkpointLabel(m))}</option>`).join('');
       const nsfw = String(im.forgeModelNsfw || '').trim();
