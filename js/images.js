@@ -107,11 +107,19 @@ const sameForgeModel = (a, b) => String(a || '').replace(/\s*\[[^\]]*\]$/, '').t
    back. The token stays on this device only: it is never written into the synced settings file. */
 const bridgeToken = () => String(LS.get('iq.bridgeToken', '') || '').trim();
 let enginePoll = null;
+let engineRecoveredAt = 0;   /* only announce a bridge-recovered picture once a minute */
 async function forgeStatus() {
   try {
     const r = await fetch(forgeUrl() + '/iq/status', { signal: AbortSignal.timeout ? AbortSignal.timeout(2500) : undefined });
     return r.ok ? await r.json() : null;
   } catch { return null; }
+}
+/* what the picture placeholder says while Forge recovers. Only a real restart counts: a merely busy
+   Forge keeps painting and must never be announced as crashed. */
+function forgeWaitText(st, crashed) {
+  if (st && (st.state === 'starting' || st.restarting)) return 'Forge crashed and is restarting…';
+  if (!crashed) return '';
+  return st && st.state === 'up' ? 'Forge is back — finishing your picture…' : 'Forge crashed and is restarting…';
 }
 function engineStatus(msg) {
   S.engineStatus = msg;
@@ -203,6 +211,7 @@ async function pumpLocal() {
         LOCAL.url[job.k] = URL.createObjectURL(blob);
       } catch (e) { LOCAL.fail[job.k] = e.message || String(e); (LOCAL.failAt = LOCAL.failAt || {})[job.k] = Date.now(); }
       LOCAL.cur = null; delete LOCAL.jobs[job.k]; swapLocal(job.k);
+      LOCAL.forgeNote = ''; LOCAL.forgeCrashed = false; LOCAL.statusAt = 0; LOCAL.statusBusy = false;
     }
   } finally { LOCAL.running = false; }
 }
@@ -332,6 +341,7 @@ async function cnFind(force) {
 }
 async function forgeGenerate(job, retried = false, noRef = false) {
   const s = S.settings.image;
+  LOCAL.forgeCrashed = false; LOCAL.forgeNote = ''; LOCAL.statusAt = 0;   /* a fresh picture starts with a clean status */
   if (s.forgeShare !== false) await freeOllamaVRAM();
   /* the character's reference photo keeps the face: sent to Forge's IP-Adapter, and skipped (never fails the picture) when that isn't set up */
   let unit = null;
@@ -360,11 +370,31 @@ async function forgeGenerate(job, retried = false, noRef = false) {
     clearTimeout(tm); doneBump();
     if (e.name === 'AbortError') throw new Error(LOCAL.cancelled === job.k ? 'Cancelled.' : 'Your PC took more than 6 minutes on one picture. Try the SDXL Lightning or SD 1.5 preset.');
     if (!retried && await forgeFind(true)) return forgeGenerate(job, true, noRef);
+    const st = await forgeStatus();
+    if (st && st.state === 'starting') throw new Error('Forge crashed and is starting again on your PC. This picture was not finished — try it again in a minute.');
+    if (st && st.state === 'down') throw new Error('Forge is closed on your PC and could not be started. Check the Forge window, then try again.');
     throw new Error(`Couldn't reach Stable Diffusion at ${forgeUrl()}. Make sure Forge is running on your PC (with the --api and --cors-allow-origins settings from the guide).`);
   }
   clearTimeout(tm); doneBump();
+  /* the bridge restarted Forge after a crash and finished this picture on the retry */
+  if (r.headers.get('X-Ironquill-Recovered') === '1') {
+    LS.set('iq.forgeLoaded', job.model || LS.get('iq.forgeLoaded', ''));
+    engineStatus('✓ Forge had crashed. It restarted itself and finished this picture.');
+    if (!engineRecoveredAt || Date.now() - engineRecoveredAt > 60000) {
+      engineRecoveredAt = Date.now();
+      toast('Forge crashed on your PC. It restarted itself and finished the picture.', 6500);
+    }
+  }
   if (!r.ok && unit) { const t = await r.text().catch(() => ''); console.warn('Forge refused the reference photo, painting without it', r.status, t.slice(0, 200)); LOCAL.cn = null; LOCAL.cnAt = Date.now(); S.cnStatus = `✗ Forge refused the reference photo (error ${r.status}), so it is off for a few minutes. Pictures still use the saved look.`; return forgeGenerate(job, retried, true); }
-  if (!r.ok) { const t = await r.text().catch(() => ''); throw new Error(`Stable Diffusion error ${r.status}${r.status === 404 ? ' (the API is off: add --api to Forge\'s settings)' : ''}: ${t.slice(0, 160)}`); }
+  if (!r.ok) {
+    const t = await r.text().catch(() => '');
+    if (r.status === 502) {
+      const st = await forgeStatus();
+      if (st && st.state === 'starting') throw new Error('Forge crashed and is starting again on your PC. This picture was not finished — try it again in a minute.');
+      if (st && st.state === 'down') throw new Error('Forge is closed on your PC and could not be started. Check the Forge window, then try again.');
+    }
+    throw new Error(`Stable Diffusion error ${r.status}${r.status === 404 ? ' (the API is off: add --api to Forge\'s settings)' : ''}: ${t.slice(0, 160)}`);
+  }
   const j = await r.json(); const b64 = j.images?.[0]; if (!b64) throw new Error('Stable Diffusion sent back no picture.');
   if (job.model) LS.set('iq.forgeLoaded', job.model);   /* what Forge now has loaded, so the next picture skips the reload */
   const img = new Image(); img.src = 'data:image/png;base64,' + String(b64).replace(/^data:[^,]+,/, ''); await img.decode();
@@ -404,6 +434,7 @@ function forgeSettingsHTML() {
     <p class="hint" id="engineStatus">${esc(S.engineStatus || '')}</p>
     <label class="f"><span>Restart token (printed in the bridge window on the PC)</span><input type="text" id="bridgeTokenIn" value="${esc(LS.get('iq.bridgeToken', ''))}" placeholder="paste it once on this device" autocomplete="off"></label>
     <p class="hint"><b>Restart Forge</b> tells the bridge to close Forge and the bridge, start both again, and keeps checking until Forge answers — so it works from your phone too. Paste the token once on each device; it is not saved in the synced settings file.</p>
+    <p class="hint">While the bridge is running it also watches Forge: if Forge crashes or is closed, the bridge starts it again and finishes the picture that was interrupted once. A notice appears here and in the app when that happens.</p>
         ${(() => { const all = [...new Set([...models, picCheckpoint(), im.forgeModelSfw, im.forgeModelNsfw].filter(Boolean))];
       const opts = all.map(m => `<option value="${esc(m)}" ${picCheckpoint() === m ? 'selected' : ''}>${esc(checkpointLabel(m))}</option>`).join('');
       return `<label class="f"><span>Picture model — one checkpoint for every picture</span><select data-bind="image.forgeCheckpoint">${all.length ? opts : '<option value="">Tap "Find it" to load models</option>'}</select></label>
@@ -547,7 +578,8 @@ function sceneHTML(m, c) {
   if (!m.image || S.settings.image.mode === 'off') return '';
   const local = S.settings.image.mode === 'local';
   const shape = S.settings.image.size || 'portrait';
-  return `<div class="scene sh-${shape}"><div class="ph"><div class="spin"></div><div>${local ? 'Painting on your PC… (usually 20 seconds to 2 minutes)' : 'Painting the scene…'}</div></div>
+  const idle = local ? 'Painting on your PC… (usually 20 seconds to 2 minutes)' : 'Painting the scene…';
+  return `<div class="scene sh-${shape}"><div class="ph"><div class="spin"></div><div class="forgenote" data-idle="${esc(idle)}">${esc(idle)}</div></div>
     <img ${local ? '' : 'loading="lazy"'} alt="${esc(m.image.prompt)}" src="${esc(imageUrl(m.image, c))}" onload="if(this.src.indexOf('data:image/svg')){this.classList.add('ld');this.previousElementSibling.style.display='none'}" onerror="imgFail(this)">
     <div class="sbtn"><button data-act="newimg" data-mid="${m.id}">New image</button></div></div>`;
 }

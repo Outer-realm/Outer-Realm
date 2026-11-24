@@ -264,14 +264,29 @@ document.addEventListener('click', e => {
 
 /* ---------- progress while Stable Diffusion paints ---------- */
 setInterval(async () => {
-  const cur0 = typeof LOCAL !== 'undefined' ? LOCAL.cur : null; const els = document.querySelectorAll('.imgprog'); if (!els.length) return;
+  const cur0 = typeof LOCAL !== 'undefined' ? LOCAL.cur : null; const els = document.querySelectorAll('.imgprog, .forgenote'); if (!els.length) return;
   let pct = null;
+  /* a picture waiting on the PC: ask the bridge whether Forge crashed, so the spinner can say so */
+  if (cur0 && S.settings.image.mode === 'local' && !LOCAL.statusBusy && Date.now() - (LOCAL.statusAt || 0) > 3000) {
+    LOCAL.statusBusy = true; LOCAL.statusAt = Date.now();
+    try {
+      const st = await forgeStatus();
+      if (st && (st.state === 'starting' || st.restarting)) LOCAL.forgeCrashed = true;
+      const note = forgeWaitText(st, LOCAL.forgeCrashed);
+      if (note) LOCAL.forgeNote = note;   /* never blank a note on one slow status reply */
+    } finally { LOCAL.statusBusy = false; }
+  }
   if (cur0 && S.settings.image.mode === 'local') { try { const r = await fetch(forgeUrl() + '/sdapi/v1/progress?skip_current_image=true', { signal: AbortSignal.timeout?.(1200) }); if (r.ok) pct = Math.round(((await r.json()).progress || 0) * 100); } catch {} }
+  document.querySelectorAll('.forgenote').forEach(el => {   /* story scene: same wait, same restart notice */
+    const txt = LOCAL.forgeNote || el.dataset.idle || '';
+    if (txt && el.textContent !== txt) el.textContent = txt;
+  });
   els.forEach(el => {
+    if (el.classList.contains('forgenote')) return;
     const im = el.closest('.palphotow')?.querySelector('img'); const src = im?.getAttribute('src') || '';
     if (S.settings.image.mode !== 'local') { el.textContent = 'Painting…'; return; }
     const mine = cur0 && src === localPH(cur0.k);
-    el.textContent = mine ? `Painting… ${pct != null && pct > 0 ? pct + '%' : Math.round((Date.now() - cur0.t) / 1000) + 's'}` : cur0 || LOCAL.queue.length ? 'Waiting its turn…' : S.busy ? 'Waiting for the story AI…' : 'Painting…';
+    el.textContent = LOCAL.forgeNote || (mine ? `Painting… ${pct != null && pct > 0 ? pct + '%' : Math.round((Date.now() - cur0.t) / 1000) + 's'}` : cur0 || LOCAL.queue.length ? 'Waiting its turn…' : S.busy ? 'Waiting for the story AI…' : 'Painting…');
   });
 }, 1500);
 function cancelLocalJob(img, ctx) {
