@@ -2,11 +2,17 @@
 /* ---------- Stable Diffusion on your own PC (Forge / AUTOMATIC1111 API) ---------- */
 const FORGE_PRESETS = {
   lightning: { label:'SDXL Lightning — realistic and fast (recommended)', base:'xl', steps:6, cfg:1.5, sampler:'DPM++ SDE', scheduler:'Karras' },
-  sdxl:      { label:'SDXL standard — most detail, slow', base:'xl', steps:28, cfg:5, sampler:'DPM++ 2M', scheduler:'Karras' },
+  sdxl:      { label:'SDXL standard — most detail, slow', base:'xl', steps:25, cfg:6, sampler:'DPM++ 2M', scheduler:'Karras' },
   sd15:      { label:'SD 1.5 — fastest, smaller pictures', base:'15', steps:25, cfg:6, sampler:'DPM++ 2M', scheduler:'Karras' }
 };
-const FORGE_SIZES = { xl: { landscape:[1216,832], square:[1024,1024], portrait:[832,1216], wide:[1344,768] }, '15': { landscape:[768,512], square:[512,512], portrait:[512,768], wide:[896,512] } };
+/* SDXL-native 1-megapixel shapes: a portrait by default, no square crop of a tall picture */
+const FORGE_SIZES = { xl: { portrait:[896,1152], square:[1024,1024], tall:[832,1216], landscape:[1216,832], wide:[1344,768] }, '15': { portrait:[512,768], square:[512,512], tall:[512,768], landscape:[768,512], wide:[896,512] } };
 const FORGE_NEG = 'cartoon, anime, illustration, painting, drawing, sketch, 3d render, cgi, plastic skin, airbrushed, deformed, disfigured, extra fingers, bad hands, bad anatomy, blurry, lowres, watermark, text, logo, signature, jpeg artifacts';
+/* the two content modes, as prompt and negative additions (JS/safety words never reach the NSFW negative) */
+const POS_SAFE = 'candid photo, natural lighting, detailed skin texture, 8k uhd';
+const POS_NSFW = 'uncensored, raw photo, realistic anatomy, detailed skin texture, natural lighting';
+const NEG_QUALITY = '(worst quality, low quality, blurry:1.2), (bad anatomy, bad hands, fused fingers, extra fingers:1.1), deformed eyes, deformed face, watermark, text, signature';
+const SPEED_LORA = { xl: '<lora:dmd2_sdxl_4step_lora:1>', '15': '<lora:sdxl_lightning_4step_lora:1>' };
 /* the standing additions from Settings → Images, on every picture */
 function picLook() { return String(S.settings.image.look || '').replace(/\s+/g, ' ').trim().slice(0, 300); }
 function picAvoid() { return String(S.settings.image.avoid || '').replace(/\s+/g, ' ').trim().slice(0, 400); }
@@ -33,7 +39,7 @@ function draftPortraitHTML(D) {
 const NSFW_NAME = /porn|nsfw|lust|xxx|hentai|sex|nude|naked|erot|lewd|adult|r18|18\+/i;
 /* Whether a picture may use the explicit model is decided in js/ageguard.js (AGE.imageAllowed),
    the same rule that decides what the story text may contain. */
-const SAFE_NEG = 'nsfw, nude, naked, nudity, nipples, topless, lingerie, sexual, explicit';
+const SAFE_NEG = '(nsfw, nude, naked, explicit:1.3), (nudity, nipples, topless, lingerie, sexual:1.2)';
 const modelKind = m => NSFW_NAME.test(m) ? 'nsfw' : 'sfw';
 function modelLabel(m) {
   if (!m) return 'Whatever Forge has loaded';
@@ -41,13 +47,36 @@ function modelLabel(m) {
   const same = all.filter(x => modelKind(x) === modelKind(m)); const n = same.indexOf(m);
   return (modelKind(m) === 'nsfw' ? 'NSFW' : 'SFW') + (same.length > 1 ? ' ' + (n + 1) : '');
 }
+/* One checkpoint paints every picture, safe or M-rated: switching content never makes Forge flush 6.5 GB
+   out of the card. What a checkpoint can do is described in words, never by file name. */
+const CP_LABELS = [
+  [/realvis.*lightning|lightning/i, 'RealVisXL V5.0 Lightning — safe and uncensored, ~15 s (recommended)'],
+  [/big.?love/i, 'Big Love XL — candid photorealism, safe and uncensored (4-step LoRA automatic)'],
+  [/pornmaster/i, 'PornMaster Pro — dedicated explicit (4-step LoRA automatic)']
+];
+function checkpointLabel(m) { const hit = CP_LABELS.find(([re]) => re.test(String(m || ''))); return hit ? hit[1] : modelLabel(m); }
+const picCheckpoint = () => String(S.settings.image.forgeCheckpoint || S.settings.image.forgeModelSfw || S.settings.image.forgeModel || '').trim();
 function autoAssignModels() {
   const im = S.settings.image; const all = S.forgeModels || [];
   if (!im.forgeModelSfw && im.forgeModel && modelKind(im.forgeModel) === 'sfw') im.forgeModelSfw = im.forgeModel;
   if (!im.forgeModelNsfw && im.forgeModel && modelKind(im.forgeModel) === 'nsfw') im.forgeModelNsfw = im.forgeModel;
-  if (!im.forgeModelSfw || (all.length && !all.includes(im.forgeModelSfw))) im.forgeModelSfw = all.find(m => modelKind(m) === 'sfw') || all[0] || '';
-  if (!im.forgeModelNsfw || (all.length && !all.includes(im.forgeModelNsfw))) im.forgeModelNsfw = all.find(m => modelKind(m) === 'nsfw') || '';
+  /* the all-in-one Lightning build is preferred; a checkpoint the player picked is kept while Forge still has it */
+  const keep = String(im.forgeCheckpoint || '').trim();
+  if (!keep || (all.length && !all.includes(keep))) {
+    im.forgeCheckpoint = all.find(m => /realvis.*lightning/i.test(m)) || all.find(m => /lightning|turbo|hyper|dmd|lcm/i.test(m)) || (all.includes(im.forgeModelSfw) ? im.forgeModelSfw : '') || all[0] || keep;
+  }
+  if (im.forgeCheckpoint) im.forgeModelSfw = im.forgeCheckpoint;
   saveSettings();
+}
+/* Distilled builds paint in a handful of steps; a standard SDXL build gets the usual 25. The speed LoRA
+   turns a backup checkpoint into a 4-step model, so it borrows the same fast numbers (Big Love XL always does). */
+function forgeTune(model, base, speedLora) {
+  const m = String(model || '');
+  if (base !== 'xl') return { steps: 25, cfg: 6, sampler: 'DPM++ 2M', scheduler: 'Karras', lora: '' };
+  if (/lightning|turbo|hyper|dmd|lcm/i.test(m)) return { steps: 6, cfg: 1.5, sampler: 'DPM++ SDE', scheduler: 'Karras', lora: '' };
+  const big = /big.?love/i.test(m);
+  if (big || speedLora) return { steps: 6, cfg: 1.5, sampler: big ? 'LCM' : 'DPM++ SDE', scheduler: big ? 'Exponential' : 'Karras', lora: SPEED_LORA[base] };
+  return { steps: 25, cfg: 6, sampler: 'DPM++ 2M', scheduler: 'Karras', lora: '' };
 }
 function pickForgeModel(c, prompt, subject = null, wanted = '') {
   const im = S.settings.image;
@@ -56,22 +85,73 @@ function pickForgeModel(c, prompt, subject = null, wanted = '') {
   const adult = normRating(c?.rating) === 'M' && !unsafe;
   /* a model chosen on the picture wins, but never past the age guard: a minor always gets the safe model */
   const want = unsafe ? '' : String(wanted || '').trim();
-  const auto = (adult && im.forgeModelNsfw) || im.forgeModelSfw || im.forgeModel || '';
-  const model = want || auto;
-  /* any adult-named model counts as NSFW, not only the one saved in Settings: a picture painted with
-     a second explicit model is still explicit, and must be labelled (and hidden in the Gallery) as such */
-  return { model, safe: !adult, kind: adult && model && modelKind(model) === 'nsfw' ? 'nsfw' : 'sfw' };
+  const model = want || picCheckpoint();
+  /* the picture's own content decides the label: a checkpoint that paints adult scenes still paints a
+     safe one, and the M-rated picture is labelled (and hidden in the Gallery) as such */
+  return { model, safe: !adult, kind: adult ? 'nsfw' : 'sfw' };
 }
 /* "Auto" reads the model's file name: Lightning/Turbo/Hyper/DMD/LCM models need few steps; anything else gets the standard SDXL settings */
 function forgePresetKey(model) {
   const s = S.settings.image; const k = s.forgePreset || 'auto';
   if (k !== 'auto' && FORGE_PRESETS[k]) return k;
-  const m = String(model ?? s.forgeModelSfw ?? s.forgeModel ?? '');
+  const m = String(model ?? picCheckpoint());
   if (/lightning|turbo|hyper|dmd|lcm/i.test(m)) return 'lightning';
   if (/sd[-_ ]?1\.?5|sd15|v1-5|realistic[-_ ]?vision/i.test(m)) return 'sd15';
   return m ? 'sdxl' : 'lightning';
 }
 const forgeUrl = () => String(LS.get('iq.forgeUrl', '') || 'http://localhost:7861').trim().replace(/\/+$/, '');
+/* Forge names a loaded checkpoint without the "[hash]" its model list adds, so compare the plain file name */
+const sameForgeModel = (a, b) => String(a || '').replace(/\s*\[[^\]]*\]$/, '').trim().toLowerCase() === String(b || '').replace(/\s*\[[^\]]*\]$/, '').trim().toLowerCase();
+/* ---------- restarting the picture engine from another device (phone) ----------
+   The bridge on the PC takes a token-guarded POST /iq/restart, then answers /iq/status until Forge is
+   back. The token stays on this device only: it is never written into the synced settings file. */
+const bridgeToken = () => String(LS.get('iq.bridgeToken', '') || '').trim();
+let enginePoll = null;
+async function forgeStatus() {
+  try {
+    const r = await fetch(forgeUrl() + '/iq/status', { signal: AbortSignal.timeout ? AbortSignal.timeout(2500) : undefined });
+    return r.ok ? await r.json() : null;
+  } catch { return null; }
+}
+function engineStatus(msg) {
+  S.engineStatus = msg;
+  const el = document.getElementById('engineStatus');
+  if (el) el.textContent = msg;
+}
+async function restartEngine() {
+  const token = bridgeToken();
+  if (!token) { engineStatus('Paste the restart token first — the bridge window on the PC prints it.'); return; }
+  if (enginePoll) { clearInterval(enginePoll); enginePoll = null; }
+  engineStatus('Asking the PC to close and start Forge again…');
+  try {
+    const r = await fetch(forgeUrl() + '/iq/restart', { method: 'POST', headers: { 'X-Ironquill-Token': token }, signal: AbortSignal.timeout ? AbortSignal.timeout(10000) : undefined });
+    if (r.status === 403) { engineStatus('That token was refused. Copy it again from the bridge window.'); return; }
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.ok) { engineStatus('The bridge said: ' + (j.error || ('HTTP ' + r.status))); return; }
+  } catch {
+    engineStatus("Couldn't reach the bridge. Is it running on the PC?");
+    return;
+  }
+  const t0 = Date.now();
+  let sawDown = false;   /* the old Forge answers for a second or two before it is killed: wait for it to go */
+  const tick = async () => {
+    if (!enginePoll) return;
+    const secs = Math.round((Date.now() - t0) / 1000);
+    const st = await forgeStatus();
+    if (!st || !st.forge) sawDown = true;
+    if (st && st.forge && (sawDown || secs >= 20)) {
+      clearInterval(enginePoll); enginePoll = null;
+      LS.set('iq.forgeLoaded', '');   /* a fresh Forge has its own default checkpoint loaded */
+      engineStatus(`✓ Back up after ${secs} s.`);
+      toast(`The picture engine is back after ${secs} seconds.`, 5000);
+      return;
+    }
+    if (secs > 240) { clearInterval(enginePoll); enginePoll = null; engineStatus('Not back after 4 minutes. Look at the Forge window on the PC.'); return; }
+    engineStatus(`Restarting… ${secs} s${sawDown ? '' : ' (stopping)'}`);
+  };
+  enginePoll = setInterval(tick, 2500);
+  tick();
+}
 const LOCAL = { url: {}, fail: {}, jobs: {}, queue: [], running: false, found: false };
 function hashStr(s) { let h1 = 0x811c9dc5, h2 = 0x9e3779b1; for (let i = 0; i < s.length; i++) { const ch = s.charCodeAt(i); h1 = Math.imul(h1 ^ ch, 16777619); h2 = Math.imul(h2 ^ ch, 2246822507); } return (h1 >>> 0).toString(16) + (h2 >>> 0).toString(16); }
 const IDB = {
@@ -82,15 +162,19 @@ const IDB = {
 };
 function forgeJob(prompt, seed, c, neg = '', ref = null, subject = null, model = '') {
   const s = S.settings.image; const pick = pickForgeModel(c, prompt, subject, model); const pk = forgePresetKey(pick.model); const P = FORGE_PRESETS[pk];
-  const [FW, FH] = FORGE_SIZES[P.base][s.size] || FORGE_SIZES[P.base].square;
+  /* Auto follows the checkpoint: Lightning and the 4-step LoRA builds paint in six steps, a standard SDXL
+     build gets the usual 25. A preset picked by hand in Settings still wins. */
+  const T = (s.forgePreset || 'auto') === 'auto' ? forgeTune(pick.model, P.base, s.speedLora) : { steps: P.steps, cfg: P.cfg, sampler: P.sampler, scheduler: P.scheduler, lora: '' };
+  const lora = T.lora, steps = T.steps, cfg = T.cfg;
+  const [FW, FH] = FORGE_SIZES[P.base][s.size || 'portrait'] || FORGE_SIZES[P.base].square;
   /* "Fast" draws SDXL pictures at 3/4 size: about half the pixels, so roughly twice as quick on smaller cards */
   const small = [Math.round(FW * 0.75 / 64) * 64, Math.round(FH * 0.75 / 64) * 64];
   const fast = P.base === 'xl' && (s.forgeRes || 'fast') === 'fast';
   const [W, H] = fast ? small : [FW, FH];
-  const keyOf = (w, h) => 'k' + hashStr([prompt, seed, w, h, pk, pick.model, pick.safe, s.forgeNeg, ...(neg ? [neg] : []), ...(ref ? ['ref:' + ref.key + ':' + (Number(s.refWeight) || 0.7)] : [])].join('|'));
+  const keyOf = (w, h) => 'k' + hashStr([prompt, seed, w, h, pk, pick.model, pick.safe, lora, s.forgeNeg, ...(neg ? [neg] : []), ...(ref ? ['ref:' + ref.key + ':' + (Number(s.refWeight) || 0.7)] : [])].join('|'));
   /* a picture already painted at the other size is reused instead of painted again */
   const alt = P.base === 'xl' ? (fast ? keyOf(FW, FH) : keyOf(small[0], small[1])) : '';
-  return { prompt, seed, W, H, P, model: pick.model, safe: pick.safe, k: keyOf(W, H), alt, neg, ref };
+  return { prompt, seed, W, H, P, steps, cfg, lora, sampler: T.sampler, scheduler: T.scheduler, model: pick.model, safe: pick.safe, k: keyOf(W, H), alt, neg, ref };
 }
 const localPH = k => 'data:image/svg+xml,' + encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="3" height="2"><desc>${k}</desc></svg>`);
 const localFailURL = k => 'data:,fail-' + k;
@@ -180,7 +264,7 @@ function helperNoteHTML() {
   return `<p class="hint">✓ Helper v${helperV}: Free VRAM is ready.</p>`;
 }
 function bumpKey(kind) {
-  if (kind === 'picture') { const im = S.settings.image; return `picture|${im.forgeModelSfw || im.forgeModel || 'auto'}|${im.forgePreset || 'auto'}`; }
+  if (kind === 'picture') { const im = S.settings.image; return `picture|${picCheckpoint() || 'auto'}|${im.forgePreset || 'auto'}|${im.speedLora ? 'lora' : ''}`; }
   const cn = typeof activeConn === 'function' ? activeConn() : null;
   return `reply|${cn?.preset || ''}|${cn?.model || ''}`;
 }
@@ -256,9 +340,16 @@ async function forgeGenerate(job, retried = false, noRef = false) {
       if (cn && b64) unit = { enabled: true, image: String(b64).replace(/^data:[^,]+,/, ''), module: cn.module, model: cn.model, weight: clamp(Number(s.refWeight) || 0.7, 0.2, 1.2), resize_mode: 'Crop and Resize', processor_res: 512, guidance_start: 0, guidance_end: 1, control_mode: 'Balanced', pixel_perfect: false };
     } catch (e) { console.warn('Reference photo skipped', e); }
   }
-  const body = { prompt: forgeBodyPrompt(job.prompt), negative_prompt: forgeBodyNeg(job.neg, job.safe), seed: job.seed, width: job.W, height: job.H, steps: job.P.steps, cfg_scale: job.P.cfg,
-    sampler_name: job.P.sampler, scheduler: job.P.scheduler, batch_size: 1, n_iter: 1, send_images: true, save_images: false };
-  if (job.model) { body.override_settings = { sd_model_checkpoint: job.model }; body.override_settings_restore_afterwards = false; }
+  /* the content mode rides along on every prompt: SFW gets safe framing and a hard safety negative,
+     NSFW gets the uncensored photorealism tags and a quality-only negative */
+  const pos = [forgeBodyPrompt(job.prompt), job.safe ? POS_SAFE : POS_NSFW, job.lora || ''].filter(Boolean).join(', ');
+  const neg = [forgeBodyNeg(job.neg, job.safe), NEG_QUALITY].filter(Boolean).join(', ');
+  const body = { prompt: pos, negative_prompt: neg, seed: job.seed, width: job.W, height: job.H, steps: job.steps ?? job.P.steps, cfg_scale: job.cfg ?? job.P.cfg,
+    sampler_name: job.sampler || job.P.sampler, scheduler: job.scheduler || job.P.scheduler, batch_size: 1, n_iter: 1, send_images: true, save_images: false };
+  /* one checkpoint for both kinds of picture: only ask Forge to load one when the wanted model really
+     changed (the player picked another one in Settings), so a SFW picture and an NSFW one never flush
+     6.5 GB of VRAM between them */
+  if (job.model && !sameForgeModel(job.model, LS.get('iq.forgeLoaded', ''))) { body.override_settings = { sd_model_checkpoint: job.model }; body.override_settings_restore_afterwards = false; }
   if (unit) body.alwayson_scripts = { ControlNet: { args: [unit] } };
   const ctl = new AbortController(); const tm = setTimeout(() => ctl.abort(), 360000);
   LOCAL.cur = { k: job.k, ctl, t: Date.now() };
@@ -275,6 +366,7 @@ async function forgeGenerate(job, retried = false, noRef = false) {
   if (!r.ok && unit) { const t = await r.text().catch(() => ''); console.warn('Forge refused the reference photo, painting without it', r.status, t.slice(0, 200)); LOCAL.cn = null; LOCAL.cnAt = Date.now(); S.cnStatus = `✗ Forge refused the reference photo (error ${r.status}), so it is off for a few minutes. Pictures still use the saved look.`; return forgeGenerate(job, retried, true); }
   if (!r.ok) { const t = await r.text().catch(() => ''); throw new Error(`Stable Diffusion error ${r.status}${r.status === 404 ? ' (the API is off: add --api to Forge\'s settings)' : ''}: ${t.slice(0, 160)}`); }
   const j = await r.json(); const b64 = j.images?.[0]; if (!b64) throw new Error('Stable Diffusion sent back no picture.');
+  if (job.model) LS.set('iq.forgeLoaded', job.model);   /* what Forge now has loaded, so the next picture skips the reload */
   const img = new Image(); img.src = 'data:image/png;base64,' + String(b64).replace(/^data:[^,]+,/, ''); await img.decode();
   const cv = document.createElement('canvas'); cv.width = img.naturalWidth; cv.height = img.naturalHeight; cv.getContext('2d').drawImage(img, 0, 0);
   return await new Promise(res => cv.toBlob(b => res(b), 'image/jpeg', 0.9));
@@ -290,6 +382,9 @@ async function forgeFind(silent) {
       const r = await fetch(u + '/sdapi/v1/sd-models', { signal: ctl.signal }); clearTimeout(tm);
       if (!r.ok) continue;
       S.forgeModels = (await r.json()).map(x => x.title || x.model_name).filter(Boolean);
+      /* Forge may have been restarted since the last picture, so ask what it really has loaded: a stale
+         note here would keep the next picture on the wrong checkpoint without ever asking for the right one */
+      try { const o = await (await fetch(u + '/sdapi/v1/options', { signal: AbortSignal.timeout ? AbortSignal.timeout(5000) : undefined })).json(); if (o && o.sd_model_checkpoint) LS.set('iq.forgeLoaded', o.sd_model_checkpoint); } catch {}
       LS.set('iq.forgeUrl', u); LOCAL.found = true; autoAssignModels(); cnFind(true).then(() => { if (S.modal === 'settings') renderModal(); });
       S.forgeStatus = `✓ Found Stable Diffusion at ${u} · ${S.forgeModels.length} model${S.forgeModels.length === 1 ? '' : 's'} (${S.forgeModels.map(modelLabel).join(', ')})`;
       if (!silent || S.modal === 'settings') renderModal();
@@ -304,16 +399,19 @@ function forgeSettingsHTML() {
   return `<p class="hint" style="color:var(--ink)">Pictures are painted by Stable Diffusion (Forge) running on your PC: free, no limits, no filter, and the most realistic option. See the README section "Realistic pictures on your PC" to install it.</p>
     <label class="f"><span>Forge address on this device</span><input type="text" id="forgeUrlIn" value="${esc(forgeUrl())}" placeholder="http://localhost:7861"></label>
     <p class="hint">On the PC: <code>http://localhost:7861</code> (the picture bridge). On your phone: your Tailscale address with <code>:8443</code> (e.g. <code>https://michael.tailfc0cb4.ts.net:8443</code>). <b>Find it</b> tries both.</p>
-    <div class="row"><button class="btn sm gold" data-act="forgefind">Find it &amp; load models</button></div>
+    <div class="row"><button class="btn sm gold" data-act="forgefind">Find it &amp; load models</button><button class="btn sm" data-act="enginerestart">Restart Forge</button></div>
     ${S.forgeStatus ? `<p class="hint">${esc(S.forgeStatus)}</p>` : ''}
-    ${(() => { const all = [...new Set([...models, im.forgeModelSfw, im.forgeModelNsfw].filter(Boolean))];
-      const opts = sel => all.map(m => `<option value="${esc(m)}" ${sel === m ? 'selected' : ''}>${modelLabel(m)}</option>`).join('');
-      return `<label class="f"><span>Pictures for regular adventures</span><select data-bind="image.forgeModelSfw">${all.length ? opts(im.forgeModelSfw) : '<option value="">Tap "Find it" to load models</option>'}</select></label>
-      <label class="f"><span>Pictures for M (Mature) adventures</span><select data-bind="image.forgeModelNsfw"><option value="" ${im.forgeModelNsfw ? '' : 'selected'}>Same as regular (SFW)</option>${opts(im.forgeModelNsfw)}</select></label>
-      <p class="hint">The app chooses for you: M (Mature) adventures use the NSFW model, everything else uses SFW. If the player character might be under 16, or a picture shows a child or teen, the SFW model is used with adult content blocked.</p>
-      ${all.length ? `<details style="margin-top:6px"><summary class="hint" style="cursor:pointer">Show file names</summary><p class="hint">${all.map(m => `${modelLabel(m)}: ${esc(m)}`).join('<br>')}</p></details>` : ''}`; })()}
+    <p class="hint" id="engineStatus">${esc(S.engineStatus || '')}</p>
+    <label class="f"><span>Restart token (printed in the bridge window on the PC)</span><input type="text" id="bridgeTokenIn" value="${esc(LS.get('iq.bridgeToken', ''))}" placeholder="paste it once on this device" autocomplete="off"></label>
+    <p class="hint"><b>Restart Forge</b> tells the bridge to close Forge and the bridge, start both again, and keeps checking until Forge answers — so it works from your phone too. Paste the token once on each device; it is not saved in the synced settings file.</p>
+        ${(() => { const all = [...new Set([...models, picCheckpoint(), im.forgeModelSfw, im.forgeModelNsfw].filter(Boolean))];
+      const opts = all.map(m => `<option value="${esc(m)}" ${picCheckpoint() === m ? 'selected' : ''}>${esc(checkpointLabel(m))}</option>`).join('');
+      return `<label class="f"><span>Picture model — one checkpoint for every picture</span><select data-bind="image.forgeCheckpoint">${all.length ? opts : '<option value="">Tap "Find it" to load models</option>'}</select></label>
+      <p class="hint">Safe and M-rated pictures use the same checkpoint, so going from a clothed scene to an explicit one never makes Forge reload 6.5 GB. RealVisXL Lightning does both. Big Love XL and PornMaster Pro turn the 4-step speed LoRA on by themselves. A picture that involves a child or teen is always painted with adult content blocked, whatever is chosen here.</p>
+      ${all.length ? `<details style="margin-top:6px"><summary class="hint" style="cursor:pointer">Show file names</summary><p class="hint">${all.map(m => `${esc(checkpointLabel(m))}: ${esc(m)}`).join('<br>')}</p></details>` : ''}`; })()}
     <label class="f"><span>Quality preset</span><select data-bind="image.forgePreset"><option value="auto" ${(im.forgePreset || 'auto') === 'auto' ? 'selected' : ''}>Auto: match each model</option>${Object.entries(FORGE_PRESETS).map(([k, v]) => `<option value="${k}" ${im.forgePreset === k ? 'selected' : ''}>${v.label}</option>`).join('')}</select></label>
-    <p class="hint">Auto picks the right speed settings for each model: fast for the SFW model, standard SDXL for the NSFW one.</p>
+    <p class="hint">Auto picks the right settings for each checkpoint: 6 steps, CFG 1.5, DPM++ SDE and Karras for Lightning and the 4-step LoRA builds (LCM and Exponential for Big Love XL); 25 steps, CFG 6 and DPM++ 2M for a standard SDXL build.</p>
+    ${bindCheck('image.speedLora', 'Use the 4-step speed LoRA (DMD2) → 6 steps, CFG 1.5 instead of 25 steps, CFG 6. Switched on automatically for Big Love XL and PornMaster Pro; ignored for Lightning builds.')}
     <div class="sect" style="font-size:18px">Reference photos (keep the same face)</div>
     ${bindCheck('image.refPhotos', 'Use each character\'s reference photo when painting them, so their face stays the same')}
     ${slider('image.refWeight', 'How closely to follow the reference photo', 0.3, 1, 0.05, v => Math.round(v * 100) + '%')}
@@ -339,9 +437,9 @@ function forgeSettingsHTML() {
 function modelPickHTML(key, cur = '', label = 'Model for this picture', elId = 'model_' + key) {
   const s = S.settings.image;
   if (s.mode !== 'local') return '';
-  const all = [...new Set([...(S.forgeModels || []), s.forgeModelSfw, s.forgeModelNsfw].filter(Boolean))];
+  const all = [...new Set([...(S.forgeModels || []), picCheckpoint(), s.forgeModelSfw, s.forgeModelNsfw].filter(Boolean))];
   const val = String(cur || '');
-  return `<label class="f"><span>${esc(label)}</span><select id="${elId}" data-pmodel="${key}"><option value="">Usual one${s.forgeModelSfw ? ` (${esc(modelLabel(s.forgeModelSfw))})` : ''}</option>${all.map(m => `<option value="${esc(m)}" ${m === val ? 'selected' : ''}>${esc(modelLabel(m))}</option>`).join('')}</select></label>
+  return `<label class="f"><span>${esc(label)}</span><select id="${elId}" data-pmodel="${key}"><option value="">Usual one${picCheckpoint() ? ` (${esc(checkpointLabel(picCheckpoint()))})` : ''}</option>${all.map(m => `<option value="${esc(m)}" ${m === val ? 'selected' : ''}>${esc(checkpointLabel(m))}</option>`).join('')}</select></label>
     ${all.length ? '<p class="hint" style="margin-top:-4px">If the picture involves a minor, the safe model is used whichever one you pick.</p>' : '<p class="hint">Tap "Find it" in Settings → Images to load the models from your PC.</p>'}`;
 }
 
@@ -448,7 +546,7 @@ function imageUrl(img, c) {
 function sceneHTML(m, c) {
   if (!m.image || S.settings.image.mode === 'off') return '';
   const local = S.settings.image.mode === 'local';
-  const shape = S.settings.image.size || 'square';
+  const shape = S.settings.image.size || 'portrait';
   return `<div class="scene sh-${shape}"><div class="ph"><div class="spin"></div><div>${local ? 'Painting on your PC… (usually 20 seconds to 2 minutes)' : 'Painting the scene…'}</div></div>
     <img ${local ? '' : 'loading="lazy"'} alt="${esc(m.image.prompt)}" src="${esc(imageUrl(m.image, c))}" onload="if(this.src.indexOf('data:image/svg')){this.classList.add('ld');this.previousElementSibling.style.display='none'}" onerror="imgFail(this)">
     <div class="sbtn"><button data-act="newimg" data-mid="${m.id}">New image</button></div></div>`;
@@ -822,6 +920,7 @@ async function syncNow(interactive) {
     saveCampaigns();
     /* 3b. companions and personas */
     try { changed += await syncPals(root); } catch (e) { console.warn('Companions sync', e); }
+    if (S.palsLocked) unreadable.set('companions', { name: 'companions', why: LOCKED, locked: true });   /* sealed cards this device cannot open */
     /* 4. index */
     await Drive.put(root, INDEX_FILE, JSON.stringify({ app: APP, version: 2, savedAt: Date.now(), settings: publicSettings(), deleted: S.deleted }), 'application/json');
     const unread = [...unreadable.values()];

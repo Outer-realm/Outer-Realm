@@ -388,9 +388,9 @@ async function palPicture(ch, o = {}) {
   /* per picture: only the people actually in it decide the rating, not everyone in the chat */
   const guarded = subjects.some(AGE.isProtected); const adult = !guarded && subjects.every(x => x.adult);
   /* an 18+ chat painted with the safe model comes back clothed and airbrushed: say it out loud instead of guessing */
-  if (adult && S.settings.image.mode === 'local' && !S.settings.image.forgeModelNsfw && !S.palPicWarned) {
+  if (adult && S.settings.image.mode === 'local' && !S.settings.image.forgeCheckpoint && !S.settings.image.forgeModelSfw && !S.palPicWarned) {
     S.palPicWarned = true;
-    toast('This chat is 18+, but no NSFW model is chosen in Settings → Images, so pictures use the safe model. Pick one under "Pictures for M (Mature) adventures".', 9000);
+    toast('This chat is 18+, but no picture model is chosen in Settings → Images. Tap "Find it & load models" and pick the all-in-one checkpoint (RealVisXL Lightning) so adult pictures come out right.', 9000);
   }
   const user = String(o.user || '').replace(/\s+/g, ' ').trim().slice(0, 500); const neg = String(o.neg ?? ch.picNeg ?? '').replace(/\s+/g, ' ').trim().slice(0, 400);
   const me = personaOf(ch); const R = persRef(me);

@@ -182,4 +182,5 @@ function undoTurn() {
 /* =========================================================================
    Images
    ========================================================================= */
-const SIZES = { landscape:[768,512], square:[640,640], portrait:[512,768], wide:[1024,576] };
+/* SDXL-native 1-megapixel shapes; portrait is the default because most pictures are of people */
+const SIZES = { portrait:[896,1152], square:[1024,1024], tall:[832,1216], landscape:[1216,832], wide:[1344,768] };

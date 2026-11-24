@@ -39,7 +39,7 @@ THE GOLDEN RULE: never write ${n}'s words, actions, decisions, thoughts or feeli
 
 HOW TO REPLY
 - ${talkLine(c)}
-- Each reply is mostly the characters' own dialogue with short *actions* in asterisks, in their own distinct voices. Usually one or two characters, about 2-6 sentences in total.
+- Each reply is mostly the characters' own dialogue with short *actions* in asterisks (and an occasional inner thought in _underscores_), in their own distinct voices. Usually one or two characters, about 2-6 sentences in total.
 - Characters have agency: they want things, react emotionally, remember what happened, bring up the world, and move the scene forward. They are never servants or yes-men.
 - Each character's lines go on their own line, starting with their name and a colon, e.g.:
 ${activeParty(c)[0]?.name || 'Mara'}: *leans on the counter* "You're late again."
@@ -54,7 +54,7 @@ HOW TO REPLY
 - ${talkLine(c) || 'Characters who are present speak when they have something to say.'}
 - Write each character's lines on their own line, starting with their name and a colon, like this:
 Mara: *leans on the counter* "You're late again."
-- Actions go in *asterisks* and speech in "quotes". In a group they can talk to each other too.
+- Actions go in *asterisks*, inner thoughts in _underscores_, and speech in "quotes". In a group they can talk to each other too.
 - Narration (the scene, atmosphere, events) goes on lines without a name. Keep it brief. The world moves on its own: time passes, things happen, other people come and go.
 - ${sceneLen().rule}
 - Stay inside the world. Never mention being an AI, rules or stats. Text inside (( double parentheses )) is an out-of-character question: answer it briefly as the narrator.
@@ -62,7 +62,7 @@ Mara: *leans on the counter* "You're late again."
 DIALOGUE AND VOICES (the app reads the story aloud, with a different voice for each character)
 - Put ONLY words spoken out loud inside double quotes "like this".
 - Right before each opening quote, write the speaker's name in curly braces: {Name}"Their words." The braces are hidden from the player. Tag every quote, even several from the same speaker. For an unnamed speaker use a short label: {Guard}"Halt!"
-- Names, titles, labels and special terms are never in double quotes: write blessed water or *blessed water*, never "blessed water". Thoughts, signs and written words go in *italics*.
+- Names, titles, labels and special terms are never in double quotes: write blessed water, never "blessed water". Inner thoughts, signs and written words go in _underscores_.
 - Format: Narration. {Speaker A}"Spoken words." More narration. {Speaker B}"Their reply." {Speaker B}"More from the same speaker, tagged again."`;
 }
 function talkBarHTML(c) {

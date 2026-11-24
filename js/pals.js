@@ -193,7 +193,11 @@ async function cardFiles(name) {
 async function adoptCardFolder(f, kind) {
   const pal = kind === 'pal';
   const id = await Drive.fileId(f.id, pal ? 'companion.json' : 'persona.json'); if (!id) return null;
-  const data = await Drive.getJSON(id);
+  let got = {};
+  try { got = await Sealed.card(await Drive.getText(id)); }   /* sealed with the vault key, or plain from an older version */
+  catch (e) { console.warn('Card read failed', e); return null; }
+  if (got.locked) { S.palsLocked = true; return null; }
+  const data = got.data;
   if (!data || (data.app && data.app !== APP)) return null;   /* not written by this app */
   const card = pal ? data.pal : data.persona;
   if (!card || !card.id || !String(card.name || '').trim()) return null;
@@ -221,14 +225,28 @@ async function adoptCardFolder(f, kind) {
 }
 async function syncPals(root) {
   cardSearch = null;
+  S.palsLocked = false;
   const empty = !Object.keys(PALS.pals).length && !Object.keys(PALS.chats).length && !Object.keys(PALS.personas).length && !Object.keys(PALS.worlds).length;
   let folder = (await Drive.list(`'${root}' in parents and name='Companions' and mimeType='${FOLDER_MIME}' and trashed=false`))[0]?.id;
   /* nothing here and no Companions folder yet: a card folder dropped straight into your story folder still counts */
   if (!folder && empty && !(await cardFiles('companion.json')).length && !(await cardFiles('persona.json')).length) return 0;
   if (!folder) folder = await Drive.createFolder('Companions', root, {});
   const fid = await Drive.fileId(folder, 'companions.json');
-  const remote = fid ? await Drive.getJSON(fid) : null;
-  let changed = 0, push = !remote;
+  /* companions.json is sealed with the vault's data key too (js/sealed.js); a plain file from an older
+     version still reads, and it is sealed the next time this file is written. */
+  let remote = null, remoteSealed = false, blocked = false;
+  if (fid) {
+    try {
+      const text = await Drive.getText(fid);
+      remoteSealed = Sealed.is(text);
+      const got = await Sealed.card(text);
+      if (got.locked) { S.palsLocked = true; blocked = true; }
+      else remote = got.data || null;
+      if (!remote && !blocked) blocked = true;   /* the file is there but unusable: never write over it */
+    } catch (e) { console.warn('companions.json could not be read — not overwriting it', e); blocked = true; }
+  }
+  let changed = 0, push = !remote && !blocked;
+  if (remote && !remoteSealed && Sealed.ready()) push = true;   /* seal an older plain copy once */
   if (remote) {
     for (const [id, t] of Object.entries(remote.deleted || {})) PALS.deleted[id] = Math.max(PALS.deleted[id] || 0, t);
     for (const k of ['pals','chats','personas','worlds']) {
@@ -244,7 +262,7 @@ async function syncPals(root) {
     if (!PALS.personas[PALS.defaultPersona] && remote.defaultPersona && PALS.personas[remote.defaultPersona]) PALS.defaultPersona = remote.defaultPersona;
   }
   if (changed) savePals(false);
-  if (push) await Drive.put(folder, 'companions.json', JSON.stringify({ app: APP, savedAt: Date.now(), ...PALS }), 'application/json');
+  if (push) await Drive.put(folder, 'companions.json', await Sealed.file('companions.json', JSON.stringify({ app: APP, savedAt: Date.now(), ...PALS })), 'application/json');
 
   /* one folder per companion */
   let folders = [];
@@ -268,12 +286,15 @@ async function syncPals(root) {
   }
   /* pull anything a companion folder has that is newer */
   for (const [pid, f] of Object.entries(byPal)) {
+    if (f.appProperties?.iqSealed === '1' && !Sealed.ready()) { S.palsLocked = true; continue; }
     if (PALS.deleted[pid] && PALS.deleted[pid] >= num(f.appProperties?.iqUpdated)) continue;
     const local = PALS.pals[pid];
     if (local && palStamp(local) >= num(f.appProperties?.iqUpdated)) continue;
     try {
       const cf = await Drive.fileId(f.id, 'companion.json'); if (!cf) continue;
-      const data = await Drive.getJSON(cf); if (!data || !data.pal) continue;
+      const got = await Sealed.card(await Drive.getText(cf));
+      if (got.locked) { S.palsLocked = true; continue; }
+      const data = got.data; if (!data || !data.pal) continue;
       if (PALS.deleted[pid] && PALS.deleted[pid] >= (data.pal.updatedAt || 0)) continue;   /* deleted on another device: do not resurrect */
       if (data.pal.updatedAt && (!local || (data.pal.updatedAt || 0) > (local.updatedAt || 0))) { PALS.pals[pid] = palUpgrade(data.pal); changed++; }
       for (const r of arr(data.chats)) {
@@ -289,7 +310,12 @@ async function syncPals(root) {
   for (const p of Object.values(PALS.pals)) {
     const stamp = palStamp(p); let f = byPal[p.id];
     const chats = Object.values(PALS.chats).filter(ch => arr(ch.palIds).includes(p.id));
-    const needsData = !f || num(f.appProperties?.iqUpdated) < stamp;
+    /* a card this device cannot open is never written over, and a sealed folder never gains a readable one */
+    if (!Sealed.ready() && S.palsLocked) continue;
+    if (f?.appProperties?.iqSealed === '1' && !Sealed.ready()) { S.palsLocked = true; continue; }
+    /* a card written before the vault existed is re-saved sealed, once */
+    const needsSeal = !!f && f.appProperties?.iqSealed !== '1' && Sealed.ready();
+    const needsData = !f || num(f.appProperties?.iqUpdated) < stamp || needsSeal;
     /* a painted portrait may not be on this device: try once, not on every sync */
     const picMark = 'pal:' + p.id + ':' + stamp;
     const needsPortrait = !!p.portrait && !f?.appProperties?.iqPortrait && !picTried.has(picMark);
@@ -302,7 +328,7 @@ async function syncPals(root) {
         if (!port && p.portrait?.prompt) port = await palPicBlob(p);
       }
       if (!port && p.portrait && !f?.appProperties?.iqPortrait) picTried.add(picMark);
-      if (needsData) await Drive.put(f.id, 'companion.json', JSON.stringify({ app: APP, savedAt: Date.now(), pal: p, chats }), 'application/json');
+      if (needsData) await Drive.put(f.id, 'companion.json', await Sealed.file('companion.json', JSON.stringify({ app: APP, savedAt: Date.now(), pal: p, chats })), 'application/json');
       if (port) await Drive.putFile(f.id, 'portrait.jpg', port, 'image/jpeg');
       if (needsData) {
         const photos = chats.some(ch => arr(ch.messages).some(m => m && m.image && m.image.data)) ? await Drive.folder(f.id, 'Photos') : null;
@@ -311,7 +337,7 @@ async function syncPals(root) {
           if (photo) await Drive.putFile(photos, 'photo-' + String(m.id) + '.jpg', photo, 'image/jpeg');
         }
       }
-      if (needsData || port) await Drive.patch(f.id, { name: palFolderName(p), appProperties: { iqPal: p.id, iqUpdated: String(stamp), ...(port ? { iqPortrait: '1' } : {}) } });
+      if (needsData || port) await Drive.patch(f.id, { name: palFolderName(p), appProperties: { iqPal: p.id, iqUpdated: String(stamp), ...(port ? { iqPortrait: '1' } : {}), ...(Sealed.ready() ? { iqSealed: '1' } : {}) } });
     } catch (e) { console.warn('Companion folder sync failed', e); }
   }
 
@@ -339,12 +365,15 @@ async function syncPals(root) {
       if (got) { byPer[got.folder.appProperties.iqPersona] = got.folder; changed += got.changed; }
     }
     for (const [pid, f] of Object.entries(byPer)) {
+      if (f.appProperties?.iqSealed === '1' && !Sealed.ready()) { S.palsLocked = true; continue; }
       if (PALS.deleted[pid] && PALS.deleted[pid] >= num(f.appProperties?.iqUpdated)) continue;
       const local = PALS.personas[pid];
       if (local && (local.updatedAt || 0) >= num(f.appProperties?.iqUpdated)) continue;
       try {
         const id = await Drive.fileId(f.id, 'persona.json'); if (!id) continue;
-        const data = await Drive.getJSON(id); if (!data || !data.persona) continue;
+        const got = await Sealed.card(await Drive.getText(id));
+        if (got.locked) { S.palsLocked = true; continue; }
+        const data = got.data; if (!data || !data.persona) continue;
         if (PALS.deleted[pid] && PALS.deleted[pid] >= (data.persona.updatedAt || 0)) continue;
         if (!local || (data.persona.updatedAt || 0) > (local.updatedAt || 0)) { PALS.personas[pid] = data.persona; changed++; }
       } catch (e) { console.warn('Persona folder read failed', e); }
@@ -352,7 +381,10 @@ async function syncPals(root) {
     if (changed) savePals(false);
     for (const x of personas) {
       const stamp = x.updatedAt || 0; let f = byPer[x.id];
-      const needsData = !f || num(f.appProperties?.iqUpdated) < stamp;
+      if (!Sealed.ready() && S.palsLocked) continue;   /* the folder is sealed: never add a readable card to it */
+      if (f?.appProperties?.iqSealed === '1' && !Sealed.ready()) { S.palsLocked = true; continue; }
+      const needsSeal = !!f && f.appProperties?.iqSealed !== '1' && Sealed.ready();
+      const needsData = !f || num(f.appProperties?.iqUpdated) < stamp || needsSeal;
       /* a painted photo may not be on this device: try once, not on every sync */
       const picMark = 'per:' + x.id + ':' + stamp;
       const needsPortrait = !!(x.portrait?.data || x.portrait?.prompt) && !f?.appProperties?.iqPortrait && !picTried.has(picMark);
@@ -366,12 +398,12 @@ async function syncPals(root) {
           if (!port && x.portrait?.prompt) port = await personaPicBlob(x.portrait);
         }
         if (needsData) {
-          await Drive.put(f.id, 'persona.json', JSON.stringify({ app: APP, savedAt: Date.now(), persona: x }), 'application/json');
-          await Drive.put(f.id, 'Persona.md', personaMD(x), 'text/markdown');
+          await Drive.put(f.id, 'persona.json', await Sealed.file('persona.json', JSON.stringify({ app: APP, savedAt: Date.now(), persona: x })), 'application/json');
+          await Drive.put(f.id, 'Persona.md', await Sealed.file('Persona.md', personaMD(x)), 'application/json');
         }
         if (!port && (x.portrait?.data || x.portrait?.prompt) && !f?.appProperties?.iqPortrait) picTried.add(picMark);
         if (port) await Drive.putFile(f.id, 'portrait.jpg', port, 'image/jpeg');
-        if (needsData || port) await Drive.patch(f.id, { name: palFolderName(x), appProperties: { iqPersona: x.id, iqUpdated: String(stamp), ...(port ? { iqPortrait: '1' } : {}) } });
+        if (needsData || port) await Drive.patch(f.id, { name: palFolderName(x), appProperties: { iqPersona: x.id, iqUpdated: String(stamp), ...(port ? { iqPortrait: '1' } : {}), ...(Sealed.ready() ? { iqSealed: '1' } : {}) } });
       } catch (e) { console.warn('Persona folder sync failed', e); }
     }
   }
@@ -389,12 +421,15 @@ async function syncWorlds(root, changed) {
   try { subs = await Drive.list(`'${rootId}' in parents and mimeType='${FOLDER_MIME}' and trashed=false`); } catch (e) { console.warn('World folders', e); }
   const byWorld = {}; for (const f of subs) { const id = f.appProperties?.iqWorld; if (id) byWorld[id] = f; }
   for (const [id, f] of Object.entries(byWorld)) {
+    if (f.appProperties?.iqSealed === '1' && !Sealed.ready()) { S.palsLocked = true; continue; }
     if (PALS.deleted[id] && PALS.deleted[id] >= num(f.appProperties?.iqUpdated)) continue;
     const local = PALS.worlds[id];
     if (local && (local.updatedAt || 0) >= num(f.appProperties?.iqUpdated)) continue;
     try {
       const fid = await Drive.fileId(f.id, 'world.json'); if (!fid) continue;
-      const data = await Drive.getJSON(fid); if (!data || !data.world) continue;
+      const got = await Sealed.card(await Drive.getText(fid));
+      if (got.locked) { S.palsLocked = true; continue; }
+      const data = got.data; if (!data || !data.world) continue;
       if (PALS.deleted[id] && PALS.deleted[id] >= (data.world.updatedAt || 0)) continue;
       if (!local || (data.world.updatedAt || 0) > (local.updatedAt || 0)) { PALS.worlds[id] = data.world; changed++; }
     } catch (e) { console.warn('World folder read failed', e); }
@@ -402,12 +437,15 @@ async function syncWorlds(root, changed) {
   if (changed) savePals(false);
   for (const w of worlds) {
     const stamp = w.updatedAt || 0; let f = byWorld[w.id];
-    if (f && num(f.appProperties?.iqUpdated) >= stamp) continue;
+    if (!Sealed.ready() && S.palsLocked) continue;   /* the folder is sealed: never add a readable card to it */
+    if (f?.appProperties?.iqSealed === '1' && !Sealed.ready()) { S.palsLocked = true; continue; }
+    const needsSeal = !!f && f.appProperties?.iqSealed !== '1' && Sealed.ready();
+    if (f && num(f.appProperties?.iqUpdated) >= stamp && !needsSeal) continue;
     try {
       if (!f) f = { id: await Drive.createFolder(palFolderName(w), rootId, { iqWorld: w.id, iqUpdated: '0' }) };
-      await Drive.put(f.id, 'world.json', JSON.stringify({ app: APP, savedAt: Date.now(), world: w }), 'application/json');
-      await Drive.put(f.id, 'Setting.md', worldMD(w), 'text/markdown');
-      await Drive.patch(f.id, { name: palFolderName(w), appProperties: { iqWorld: w.id, iqUpdated: String(stamp) } });
+      await Drive.put(f.id, 'world.json', await Sealed.file('world.json', JSON.stringify({ app: APP, savedAt: Date.now(), world: w })), 'application/json');
+      await Drive.put(f.id, 'Setting.md', await Sealed.file('Setting.md', worldMD(w)), 'application/json');
+      await Drive.patch(f.id, { name: palFolderName(w), appProperties: { iqWorld: w.id, iqUpdated: String(stamp), ...(Sealed.ready() ? { iqSealed: '1' } : {}) } });
     } catch (e) { console.warn('World folder sync failed', e); }
   }
   return changed;
@@ -611,9 +649,11 @@ function palSystem(ch, to) {
   const who = [clash ? 'the player' : '', sexWord(me)].filter(Boolean).join(', ');
   const sys = [
     `You are ${group ? 'playing several characters in a group conversation' : `${ps[0].name}`} in a private roleplay and companion app, talking with ${R.n}${who ? ` (${who})` : ''}.${about ? ` About ${R.obj}: ${about}.` : ''}${look ? ` ${R.One} looks like this: ${look}` : ''}`,
+    person ? '' : `THIS IS A TEXT CHAT, NOT A ROLEPLAY SCENE. Every reply must read like messages on a phone. Never narrate and never describe what you or anyone else looks like, wears, does, moves or feels: no stage directions, no "she looks down at her hands" lines, no *asterisks*, no _underscores_, no parentheses around actions, and no quotation marks around your own words. Write only the words ${group ? 'the characters type' : 'you type'}. WRONG: *smiles* "Hey, you're late." / looks down at her hands, then back up at him. RIGHT: hey, you're late. sorry, got held up.`,
     `Stay fully in character as a real person with your own life, moods, opinions and memory. Never mention being an AI, a model or a story. Be warm and engaging, follow ${R.own} lead, and also bring your own ideas, questions, feelings and plans so the conversation goes somewhere. React to what ${R.one} actually said. Don't repeat yourself: never reuse a sentence, phrase, joke, greeting or question you have already used, never open two replies the same way, and never say the same thing twice in one reply.`,
+    `Write like a real message from a real person: one to three short sentences, everyday words and contractions. Never use bullet points, numbered lists, headers or bold labels, never restate what ${R.one} just said, and never sign off formally ("let me know if you need anything"). Ask something back when it fits.`,
     `Never write ${R.poss} words, actions, thoughts or feelings. Only your own.`,
-    `If ${R.one} ${R.v('writes')} something in ((double brackets)), it is a direction from the player about the story or your behaviour: follow it without commenting on it. In ${R.poss} messages, *text in asterisks* is something ${R.one} ${R.v('does')} and "text in quotes" is something ${R.one} ${R.v('says')} out loud.`,
+    `If ${R.one} ${R.v('writes')} something in ((double brackets)), it is a direction from the player about the story or your behaviour: follow it without commenting on it. In ${R.poss} messages, *text in asterisks* is something ${R.one} ${R.v('does')} and "text in quotes" is something ${R.one} ${R.v('says')} out loud. That is only how to read the player's messages: it never means you may write actions, narration or thoughts yourself.`,
     minors.length ? `Keep everything wholesome and age-appropriate: ${minors.map(p => p.name).join(', ')} ${minors.length > 1 ? 'are minors' : 'is a minor'}. No romance, flirting or sexual content of any kind.` : contentRules(adultAll ? 'M' : 'PG-13', { character: ps[0], party: ps }),
     '', ...ps.map(desc), '',
     shared.length ? `WHAT EVERYONE IN THIS GROUP KNOWS:\n${shared.map(m => '- ' + m.t).join('\n')}` : '',
@@ -625,8 +665,8 @@ function palSystem(ch, to) {
     said.length ? `YOU HAVE ALREADY SAID THIS (your own most recent messages, newest last). Do not repeat these lines or their point, and do not ask a question you already asked; every reply must add something new:\n${said.map(l => '  > ' + l).join('\n')}` : '',
     now,
     person
-      ? `RIGHT NOW YOU ARE TOGETHER IN PERSON. Write the moment as a roleplay scene from your side: *actions, expressions and body language in asterisks* mixed with your spoken dialogue in quotes, plus a little of the surroundings. ${PAL_LENGTHS[ch.length || 'normal'].rule || 'One to three short paragraphs.'} Leave room for ${R.obj} to respond.`
-      : `RIGHT NOW YOU ARE TEXTING (phone, online, messages; not together). Write natural text messages — short, casual, separated by blank lines if you send more than one bubble. ${PAL_LENGTHS[ch.length || 'normal'].rule || ''}`,
+      ? `RIGHT NOW YOU ARE TOGETHER IN PERSON. Write the moment as a roleplay scene from your side: *actions, expressions and body language in asterisks*, inner thoughts in _underscores_, spoken dialogue in quotes, plus a little of the surroundings. ${PAL_LENGTHS[ch.length || 'normal'].rule || 'One to three short paragraphs.'} Leave room for ${R.obj} to respond.`
+      : `RIGHT NOW YOU ARE TEXTING (phone, online, messages; you are NOT together, and this is not a scene). Reply ONLY as text messages, exactly as a real person types on a phone. No narration, no scene-setting, no describing the room, the surroundings, your body language or your expression, and no *actions* in asterisks, no _inner thoughts_ and no speaker names or labels. Even if ${R.n} writes *an action* or _a thought_, that is only how the app marks their message: answer it with words alone, like a text, and never quote your reply. Short, casual messages, separated by blank lines if you send more than one bubble. ${PAL_LENGTHS[ch.length || 'normal'].rule || ''}`,
     group ? `THIS IS A GROUP: everyone here sees every message. ${to && to !== 'all' ? `${R.n} is talking to ${to.name} right now, so ONLY ${to.name} answers this time. The others read it and stay quiet.` : `${R.n} is talking to everyone. Whoever has something to say answers: usually one to three of them, each in her own voice. They can react to each other too (tease, agree, argue, pile on). Not everyone has to speak every time.`}
 FORMAT: start each character's part on a new line with her name in curly braces, exactly like this:
 {${ps[0].name}} ${person ? '*grins* "Look who showed up."' : 'look who finally showed up'}
@@ -746,6 +786,59 @@ function palLoopSame(a, b) {
   let hit = 0; for (const w of A) if (B.has(w)) hit++;
   return hit / Math.max(A.size, B.size);
 }
+/* ---------- texting mode: a reply must read like messages, not a scene ----------
+   Models slip into roleplay even when told not to, so the app also cleans the reply:
+   stage-direction lines are dropped, *actions* and _thoughts_ are removed, and quotes
+   wrapped around a whole message are unwrapped. Ordinary text is left alone. */
+const PAL_STAGE_WORDS = 'looks?|smiles?|laughs?|chuckles?|sighs?|nods?|shrugs?|leans?|grins?|blushes?|frowns?|glances?|gazes?|stares?|turns?|walks?|steps?|sits?|stands?|reaches?|tilts?|bites?|pauses?|hesitates?|whispers?|murmurs?|mutters?|rolls?|blinks?|pulls?|wraps?|crosses?|shakes?|brushes?|tucks?|fiddles?|scoffs?|smirks?|winks?|hugs?|kisses?|holds?|drops?|sets?|puts?|picks?|opens?|closes?|takes?|gives?';
+const PAL_STAGE_VERB = new RegExp(`^(?:${PAL_STAGE_WORDS})\\b`);
+const PAL_STAGE_SUBJECT = new RegExp(`^(?:she|he|they|it|[A-Z][a-z]+)\\s+(?:${PAL_STAGE_WORDS})\\b`);
+const PAL_BARE_VERB = new RegExp(`^(?:${PAL_STAGE_WORDS})[.!?…]*$`);
+/* "looks good", "she looks tired": an adjective after look/looks is ordinary speech */
+const PAL_LOOK_SOFT = /^(?:(?:she|he|they|it|[A-Z][a-z]+)\s+)?looks?\s+(?:good|great|nice|fine|ok(?:ay)?|cool|better|best|amazing|awesome|beautiful|pretty|happy|sad|tired|angry|upset|excited|ready|busy|like|similar|familiar|well|ill|sick|interested)\b/;
+/* everyday phrased verbs that only look like narration ("turns out he was right") */
+const PAL_ORDINARY_START = /^(?:turns? out|works? out|figures? out|checks? out|finds? out|points? out|hangs? out|holds? up|picks? up|drops? by|sets? in|looks? up (?:the|a|an|that|this|it|them|some)\b|takes? (?:a|an|the|it|its?|me|him|her|them|my|your|us)\b|gives? (?:me|him|her|them|us|it|a|an|the|up|in|out)\b|puts? (?:it|that|this|them|me|him|her|us|off|on|away|up|in|down|out)\b|opens? (?:at|on|until|up|early|late|the)\b|closes? (?:at|on|early|late|the)\b|(?:turns?|picks?|holds?|drops?|sets?|puts?|gives?) (?:it|that|this|them|me|him|her|us|up|down|out|off|on|in|over|back)\b)/;
+const PAL_THIRD = /\b(?:she|he|they|it|her|his|their|its|him|them)\b/;
+const PAL_BODY = /\b(?:eyes?|gaze|head|hands?|fingers?|arms?|lips?|mouth|jaw|shoulders?|chest|breath|cheeks?|face|hair|brows?|eyebrows?|neck|waist|hips?|legs?|knees?|thighs?|feet|foot|toes?|tongue|teeth|chin|ears?|palms?|wrists?|stomach)\b/;
+const PAL_DIRECTION = /\b(?:down|up|away|back|over|around|towards?|across|into|at|through|beside|behind|forward|closer|onto|against|in|on|past|along)\b/;
+const PAL_NARRATION_ADVERB = /\b(?:softly|gently|slowly|quietly|nervously|shyly|warmly|coldly|tiredly|angrily|sadly|happily|sweetly|apologetically|hesitantly|carefully|lightly|firmly|briefly|sharply|dryly|flatly|sheepishly|awkwardly|reluctantly|fondly|playfully|teasingly)\b/;
+/* A stage direction is third-person narration: a subject plus an action verb, a body part, a
+   direction or a narration adverb. Capitalisation plays no part, so "looks good" and
+   "sounds good" are ordinary messages, while "looks down at her hands" is narration. */
+const palStageLine = t => {
+  const s = String(t || '').replace(/\s+/g, ' ').trim();
+  if (!s || s.length >= 220 || /["“”]/.test(s)) return false;
+  if (/\b(?:i|me|my|mine|we|us|our|you|your|yours)\b/i.test(s)) return false;
+  if (PAL_LOOK_SOFT.test(s) || PAL_ORDINARY_START.test(s)) return false;
+  if (!PAL_STAGE_VERB.test(s) && !PAL_STAGE_SUBJECT.test(s)) return false;
+  if (PAL_STAGE_SUBJECT.test(s) || PAL_BARE_VERB.test(s)) return true;
+  return PAL_THIRD.test(s) || PAL_BODY.test(s) || PAL_DIRECTION.test(s) || PAL_NARRATION_ADVERB.test(s);
+};
+/* only a reply with quoted speech or *action* markup is a roleplay reply; anything else is
+   ordinary texting and is never rewritten (so a short message like "Looks good." survives) */
+const PAL_ROLEPLAY_SHAPE = /\*[^*\n]+\*|["“”][^"“”\n]+["“”]/;
+function palTextOnly(text) {
+  const src = String(text || '');
+  if (!PAL_ROLEPLAY_SHAPE.test(src)) return src.trim();
+  const out = [];
+  for (const raw of src.split(/\n{2,}/)) {
+    const hadAction = /\*[^*\n]+\*/.test(raw);
+    let p = raw.replace(/\*+([^*\n]+?)\*+/g, ' ').replace(/(^|\s)_([^_\n]+?)_(?=\s|[.,!?]|$)/g, ' ').replace(/[ \t]+/g, ' ').trim();
+    /* words left after an action are dialogue ("*nods* Looks good."), not stage directions */
+    if (!p || (!hadAction && palStageLine(p))) continue;
+    const quotes = [...p.matchAll(/[“"]([^”"]+)[”"]/g)].map(m => m[1].trim()).filter(Boolean);
+    const outside = p.replace(/[“"][^”"]*[”"]/g, '').trim();
+    if (quotes.length && (hadAction || !outside || palStageLine(outside))) {
+      const lead = (p.match(/^(?:\{[^{}\n]{1,40}\}\s*)+/) || [''])[0];
+      p = (lead + quotes.join(' ')).trim();
+    }
+    /* unwrap only a single pair that surrounds the whole message, so a quoted song title keeps its closing quote */
+    const marks = p.match(/["“”]/g) || [];
+    if (marks.length === 2 && /^["“]/.test(p) && /["”]$/.test(p)) p = p.slice(1, -1).trim();
+    if (p) out.push(p);
+  }
+  return out.join('\n\n');
+}
 /* drop a paragraph or a sentence the model wrote over and over in the same reply */
 function palDedupeText(text) {
   const seen = new Set(); const out = []; let last = '';
@@ -766,6 +859,9 @@ function palDedupeText(text) {
 }
 async function palReply(ch, opts = {}) {
   const ps = palsOf(ch); if (!ps.length || S.palBusy) return;
+  /* companion mode: adult content is on only when every companion in the chat is an adult who allows it,
+     which is the same rule the prompt below enforces on the page */
+  aiContext('companion', ps.every(p => p.adult && !AGE.isProtected(p)) && !ps.some(palMinor));
   const R0 = persRef(personaOf(ch));
   if (!textReady()) return toast('Set up an AI first (Settings → Story AI).');
   const group = ps.length > 1; const to = opts.to || palTo(ch);
@@ -785,7 +881,7 @@ async function palReply(ch, opts = {}) {
     else if (m.role === 'user') add('user', (group && m.to && m.to !== 'all' && PALS.pals[m.to] ? `(to ${PALS.pals[m.to].name}) ` : '') + m.text + (m.image ? ' ((sent a picture))' : ''));
     else add('assistant', (group ? `{${palWho(ch, m)?.name || ''}} ` : '') + m.text + (m.image ? ` *sends a photo*` : ''));
   }
-  if (opts.opener && !hist.length) add('user', `((Write the first message ${lead.name} sends to ${R0.n}, in ${lead.name}'s voice. Set the scene from ${lead.name}'s side of it: ${String(lead.scenario || 'saying hello for the first time').trim().replace(/[.!?]+$/, '')}. In that line "you" and "your" mean ${R0.n}, never you; it is their house, their day, their side of the situation. Write only what ${lead.name} says and does.))`);
+  if (opts.opener && !hist.length) add('user', `((Write the first message ${lead.name} sends to ${R0.n}, in ${lead.name}'s voice. Set the scene from ${lead.name}'s side of it: ${String(lead.scenario || 'saying hello for the first time').trim().replace(/[.!?]+$/, '')}. In that line "you" and "your" mean ${R0.n}, never you; it is their house, their day, their side of the situation. ${ch.channel === 'person' ? `Write only what ${lead.name} says and does.` : `Write only the text message ${lead.name} sends: words alone, with no narration, no actions and no quotation marks.`}))`);
   else if (opts.prompt) add('user', opts.prompt);
   /* a steer is the last thing the model reads, so it outranks the habit of reusing what it just wrote */
   else if (ch.steer) add('user', `((DIRECTION FROM THE PLAYER FOR THIS REPLY. Follow it exactly and stay in character; never mention being told:\n${ch.steer}\n))`);
@@ -816,15 +912,17 @@ async function palReply(ch, opts = {}) {
   let recall = '';
   try { recall = (await recallP) || ''; } catch (e) { if (e.name !== 'AbortError') console.warn('Recall failed', e); }
   const sysMsg = { role: 'system', content: palSystem(ch, to) + (recall ? `\n\nMEMORY OF THIS CONVERSATION (your own recollection, read back from the messages: treat it as true, pick up what is still open, and never mention that it was written down):\n${recall}` : '') + (loreNote ? '\n\n' + loreNote : '') };
+  /* texting replies get the roleplay stripped out of them; in-person replies keep actions */
+  const cleanOut = t => { const d = palDedupeText(stripThink(t)); return ch.channel === 'person' ? d : (palTextOnly(d) || d); };
   const ask = (stream, extra) => chat([sysMsg, ...hist, ...(extra || [])],
-    { maxTokens: Math.round(PAL_LENGTHS[ch.length || 'normal'].tok * (group && to === 'all' ? 1.7 : 1)), temperature: 0.85, stream, signal, onToken: full => { msg.text = palDedupeText(stripThink(full)); paintPalLog(); } });
+    { maxTokens: Math.round(PAL_LENGTHS[ch.length || 'normal'].tok * (group && to === 'all' ? 1.7 : 1)), temperature: 0.85, stream, signal, onToken: full => { msg.text = cleanOut(full); paintPalLog(); } });
   const live = !!S.settings.text.stream;   /* one setting covers story turns and companion replies */
   try {
     let out = '';
     const doneBump = slowBump('reply');
-    try { out = palDedupeText(stripThink((await ask(live)).trim())); }
+    try { out = cleanOut((await ask(live)).trim()); }
     finally { doneBump(); }
-    if (!out) out = palDedupeText(stripThink(await ask(false)).trim());   /* some models send an empty first try */
+    if (!out) out = cleanOut(await ask(false));   /* some models send an empty first try */
     /* it just said this: one more try, asked plainly, instead of showing the same reply again.
        A steered reply ("don't repeat") is measured against the last few lines, not only the one before. */
     const refs = [...ch.messages].reverse().filter(m => m.role === 'pal' && String(m.text || '').trim() && !m.streaming && m !== msg).slice(0, opts.noRepeat ? 4 : 1);
@@ -833,7 +931,7 @@ async function palReply(ch, opts = {}) {
       const harder = opts.noRepeat
         ? '((That is too close to something you have already said. Write a genuinely different reply: new words, a different subject, question or detail, and follow the direction above.))'
         : '((That is almost exactly what you said last time. Say something genuinely different now: react to my last message, and add a new detail, question or plan in new words.))';
-      const again = palDedupeText(stripThink(await ask(false, [{ role: 'user', content: harder }])).trim());
+      const again = cleanOut(await ask(false, [{ role: 'user', content: harder }]));
       if (again && near(again) < near(out)) out = again;
     }
     const i = ch.messages.indexOf(msg);

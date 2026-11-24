@@ -42,10 +42,10 @@ The scripts are plain files loaded in order; there is nothing to build or instal
 
 | Part | Setting |
 |---|---|
-| App address | **https://outer-realm.netlify.app** (Netlify, deploys automatically from GitHub bufordlcm/Outer-Realm; the old site was ironquillstories.netlify.app) |
-| Story AI | **Ollama** on the GTX 1070 Ti: **Wayfarer 12B** (or an uncensored **Qwen3.5 9B**) writes, **dolphin3** runs the rule steps |
-| Pictures | **Forge** on the GTX 1060 6GB, reached through the helper on port 7861 |
-| Ollama settings (Windows user variables) | `OLLAMA_ORIGINS` = your app address(es), comma separated · `OLLAMA_CONTEXT_LENGTH` = `12288` · `OLLAMA_HOST` = `0.0.0.0:11434` · `CUDA_VISIBLE_DEVICES` = the 1070 Ti |
+| App address | **https://outer-realm.netlify.app** (Netlify, deploys automatically from GitHub Outer-realm/Outer-Realm) |
+| Story AI | **Ollama** on the GTX 1060 6GB (`gemma3:4b` by default, `qwen3.5:4b` for D&D, `huihui_ai/qwen3.5-abliterated:4b` on adult scenes) |
+| Pictures | **Forge** on the GTX 1070 Ti 8GB (`--device-id 1`), reached through the helper on port 7861 |
+| Ollama settings (Windows user variables) | `OLLAMA_ORIGINS` = your app address(es), comma separated · `OLLAMA_CONTEXT_LENGTH` = `12288` · `OLLAMA_HOST` = `0.0.0.0:11434` · `OLLAMA_VULKAN` = `0` (keeps Ollama on the 1060) |
 | Phone access | Tailscale. PC address **https://michael.tailfc0cb4.ts.net** (Ollama) and port **8443** (the helper) |
 | Saves | Google Drive folder `1aWDwaZ…` (built into the app). The Google OAuth client must list every app address under Authorized JavaScript origins |
 | World builder AI | OpenRouter free key: builds worlds and characters; play stays on your PC |
@@ -124,7 +124,7 @@ One-time setup (about 10 minutes, free):
    - Leaving it in **Testing** mode is fine for personal use.
 4. **Credentials → Create credentials → OAuth client ID**:
    - Application type: **Web application**.
-   - **Authorized JavaScript origins**: add your site's address exactly as the app shows it in Settings → Google Drive (e.g. `https://ironquill-mike.netlify.app`). No trailing slash, no path. Optionally also add `http://localhost:8080` for local testing.
+   - **Authorized JavaScript origins**: add your site's address exactly as the app shows it in Settings → Google Drive (here `https://outer-realm.netlify.app`). No trailing slash, no path. Optionally also add `http://localhost:8080` for local testing.
    - Create, then copy the **Client ID** (`…apps.googleusercontent.com`).
 5. In the app: **Settings → Google Drive** → check the folder link → paste the Client ID → **Connect & sync** → choose the Google account that owns the folder → Advanced → Continue → Allow.
 6. Repeat step 5 on each device, using the same site URL.
@@ -146,20 +146,21 @@ Google Drive has no passphrase and no "encrypt this folder" setting. It encrypts
 - **On another device:** paste the same Client ID, connect to Drive, and enter the same passphrase once. With *Remember* ticked it unlocks by itself from then on.
 - **Changing the passphrase, or starting a second vault.** Before it uploads, the app reads the vault already in Drive and tries the new passphrase on it. If that passphrase opens it, the vault is simply re-saved. If it does not, the file belongs to a different passphrase, so the app asks before replacing it — cancelling changes nothing, on this device or in Drive. The automatic re-save after a key change never replaces a vault it cannot open; it waits for you to save from the settings instead.
 - **Delete the old unencrypted keys file** — the button under the vault settings moves `ironquill-keys.json` to the Drive bin. Until you do, Drive still holds a readable copy of your keys.
-- **Testing it without Drive.** `node test/vault.test.js` runs the real vault and Drive code against a fake in-memory Drive — no Google account needed — and checks a first save, a reload that unlocks from the remembered passphrase, a wrong passphrase, an empty folder, a save sync whose `campaign.json` in Drive cannot be read, and sealed saves (written, read on a second device, locked on a third, migrated from plain text). 67 checks, all local.
+- **Testing it without Drive.** `node test/vault.test.js` runs the real vault and Drive code against a fake in-memory Drive — no Google account needed — and checks a first save, a reload that unlocks from the remembered passphrase, a wrong passphrase, an empty folder, a save sync whose `campaign.json` in Drive cannot be read, sealed saves (written, read on a second device, locked on a third, migrated from plain text), sealed companion cards and chats, and sealed persona and setting files. 92 checks, all local.
 - **No recovery.** The passphrase is not stored in Drive and cannot be reset. If it is lost, delete `ironquill-vault.json`, then save a fresh vault from a device that still has your keys in its browser.
 
 ### Sealed saves
 
 The same vault seals the saves, so there is no second passphrase and no extra step per adventure:
 
-- One random **AES-256 data key** lives in `ironquill-vault.json`, wrapped by the passphrase key (the `secret` field). Every save written to Drive — `campaign.json`, `Character Sheet.md`, `Story Log.md` — is sealed with that key in the browser, under its existing name. The folder therefore holds no readable copy of a story, a character sheet or a save file.
+- One random **AES-256 data key** lives in `ironquill-vault.json`, wrapped by the passphrase key (the `secret` field). Every save written to Drive — `campaign.json`, `Character Sheet.md`, `Story Log.md` — and every card file — `Companions/companions.json`, each companion's `companion.json` (their card and your chat history), each persona's `persona.json` and `Persona.md`, and each shared setting's `world.json` and `Setting.md` — is sealed with that key in the browser, under its existing name.
 - **On another device** it is the same act as before: enter the vault passphrase once. That unwraps the save key and the adventures open normally.
 - **Plain files from an older version still load.** A `campaign.json` that is ordinary JSON is read exactly as before, and that adventure is sealed the next time it changes. No migration step, nothing to delete.
 - **A locked device shows the saves as locked and writes nothing over them.** If the passphrase has not been entered yet, or is wrong, the sync finds sealed saves it cannot open: every one of them is left exactly as it was, no readable save is added to that folder, and the sync line reads *Locked — the saves in Drive are sealed; unlock your vault to read them.* Enter the passphrase and sync again.
+- **Companion, persona and setting cards are covered too.** `companions.json` (the combined backup), each companion's `companion.json`, each persona's `persona.json` and `Persona.md`, and each setting's `world.json` and `Setting.md` are sealed the same way, and each of those folders is marked `iqSealed`. A device that cannot open the vault leaves such a card exactly as it is instead of overwriting it, and never adds a readable card to a sealed folder; a card written before sealing existed stays readable and is sealed on the next sync from a device whose vault is unlocked.
 - **A vault re-save keeps the wrapped key** it found in Drive, so changing the passphrase never locks a device out of saves that were already written. Replacing a vault whose passphrase you do not know does start a new save key: the saves sealed with the old one stay locked, so download the folder first if that matters.
 
-What this does and doesn't cover: your keys and every adventure save are encrypted end to end. Two things in the folder stay readable: the **Story Doc** (Google Docs cannot be encrypted client-side) and the **pictures** (`Ironquill pictures`, and each adventure's own `Photos` folder). Folder and file names, sizes and timestamps also remain visible. For those, protect the account itself: use two-factor authentication and keep the folder private.
+What this does and doesn't cover: your keys, every adventure save, and your companion, persona and setting cards and chats are encrypted end to end. Still readable in the folder: the **Story Doc** (Google Docs cannot be encrypted client-side), the **pictures** (`Ironquill pictures`, and each adventure's own `Photos` folder) and the settings index `_ironquill-index.json`. Folder and file names, sizes and timestamps also remain visible. For those, protect the account itself: use two-factor authentication and keep the folder private.
 - **Once you have a Client ID**, it can be built into the app (it isn't a secret). Then no device ever has to type it.
 - Since the app is in "Testing" mode, Google may ask you to re-approve about once a week. That's normal.
 
@@ -179,6 +180,7 @@ Free, with no daily limit and no outside company filtering content. The PC must 
 4. In the app it's found automatically, or tap Setup → **Find Ollama**. If Chrome asks about local network access, choose **Allow**.
 
 **Choosing a model by graphics card memory (November 2026):**
+- **6 GB** → the small trio below: `gemma3:4b` (3.3 GB), `gemma4:e2b-it-qat` (4.3 GB), `qwen3.5:4b` (3.4 GB). Each leaves room on the card for a 4k–8k context, so they answer in about a second.
 - **8 GB** → `wayfarer` Q4 (6.7 GB, still the best pure storyteller for this game) or `huihui_ai/qwen3.5-abliterated:9b` (6.6 GB: a year newer, uncensored, noticeably faster). `qwen3.5:4b` (3.3 GB) is the quick option when you want the first words to appear almost at once.
 - **12 GB** → `gemma4:12b` (7.7 GB) or `mistral-nemo` (7.1 GB); `qwen3.5:9b` also fits with room for its context.
 - **16 GB+** → `qwen3.5:27b` (17 GB), `gemma4:26b` (16 GB) or a 24B roleplay tune.
@@ -226,6 +228,42 @@ Wayfarer is still the best model made specifically for second-person adventures,
 
 **Checking what fits:** after a pull, run `ollama ps` while a model is loaded. **100% GPU** means it fits; a split percentage means it is using system RAM and will be slow, so drop to the 4B or `Q4`/`IQ4` build. Two different models can't share an 8 GB card, so keeping dolphin3 as the helper does cost a swap per turn — clear **Helper model** if you'd rather have one model do everything.
 
+## Small text models for a 6 GB card, and how to make them chat well
+
+`gemma3:4b`, `gemma4:e2b-it-qat` and `qwen3.5:4b` all fit a 6 GB card with the whole context on the GPU, so they answer almost instantly. The app knows all three: **Auto-pick** still prefers Wayfarer, the uncensored Qwen3.5, then Qwen3.5 and Gemma 4, and only falls back to these three when nothing larger is installed. Any of them also works as the helper model if you'd rather not keep dolphin3 loaded on a small card.
+
+```
+ollama pull gemma3:4b
+ollama pull gemma4:e2b-it-qat
+ollama pull qwen3.5:4b
+```
+
+They're also the right picks for ordinary back-and-forth (texting a companion, or `ollama run` in a terminal). Three settings do most of the work:
+
+- **Give it a voice.** Ask for short, casual replies with a follow-up question instead of an essay:
+
+  ```
+  You're texting like a friend, not writing an email. Keep replies to one to three short sentences.
+  Use casual, everyday language and contractions. Ask a follow-up question when it fits the moment.
+  Never use bullet points or numbered lists, never restate what I just said, and never sign off with a
+  formal closing like "let me know if you have any other questions". Say the thing, then stop.
+  ```
+
+  In the app: **Companions → your companion → Edit → Personality** (and set that chat's **Length** to *Short*), or **Game settings → personality → Custom…** for the narrator. Don't fight the app's own prompts — put the voice in those fields.
+- **Creativity 0.85.** Settings → Text AI → **Creativity**. Around 0.8–0.9 gives variety and humor instead of predictable phrasing; the app already defaults to 0.85. Use 1.0+ only if you want it noticeably looser.
+- **Keep memory at 4k–8k.** On the Ollama card in Settings → Text AI set **AI memory** to `6144` (or `8192`), and set `OLLAMA_CONTEXT_LENGTH` on the PC to the same number. 4k tokens is roughly 3,000 words of back-and-forth, which is plenty for chat and keeps the whole model plus context on the card. Bigger contexts slow these small models down and buy you very little.
+
+If you'd rather bake the prompt into the model so a plain `ollama run` behaves too, a Modelfile works:
+
+```
+FROM qwen3.5:4b
+PARAMETER temperature 0.85
+PARAMETER num_ctx 6144
+SYSTEM """You're texting like a friend, not writing an email. Keep replies to one to three short sentences. Use casual, everyday language and contractions. Ask a follow-up question when it fits. Never use bullet points or numbered lists, never restate what I just said, and never sign off formally. Say the thing, then stop."""
+```
+
+Save it as `Modelfile`, then `ollama create qwen3.5:4b-chat -f Modelfile` and `ollama run qwen3.5:4b-chat`. Swap the `FROM` line for `gemma3:4b` or `gemma4:e2b-it-qat` to do the same for the others. Note that the app sends its own system prompt for story turns and companion chats, which overrides a Modelfile's `SYSTEM`, so inside the app use the Personality / GM personality fields instead.
+
 **Optional speed-up:** add the Windows environment variable `OLLAMA_KV_CACHE_TYPE` = `q8_0`, together with `OLLAMA_FLASH_ATTENTION` = `1`, then restart Ollama. This halves the memory the story history uses, so more of the model fits on the graphics card. If Ollama errors afterwards, delete both variables and restart it.
 
 **How a turn works now**
@@ -244,7 +282,7 @@ Settings → Story AI → **Turn quality**:
 
 ## 5b. Realistic pictures on your PC (Stable Diffusion / Forge)
 
-Free, no limits, no content filter. It runs on the same PC as Ollama, and they take turns on the graphics card.
+Free, no limits, no content filter. It runs on the same PC as Ollama but on its own card: Ollama on the GTX 1060 6GB, Forge on the GTX 1070 Ti 8GB, so a reply and a picture never wait for each other or fight over 6 GB of memory.
 
 **1. Install Forge**
 1. Install **7-Zip** from 7-zip.org.
@@ -261,9 +299,9 @@ Free, no limits, no content filter. It runs on the same PC as Ollama, and they t
 1. Open **`E:\Forge\webui\webui-user.bat`** in Notepad.
 2. Change the `set COMMANDLINE_ARGS=` line to:
    ```
-   set COMMANDLINE_ARGS=--api --cors-allow-origins=https://ironquillstories.netlify.app --always-offload-from-vram
+   set COMMANDLINE_ARGS=--api --cors-allow-origins=https://outer-realm.netlify.app --device-id 1
    ```
-   (`--always-offload-from-vram` hands the graphics card back to Ollama after each picture.)
+   (`--device-id 1` puts Forge on the second card, the GTX 1070 Ti. On a single-card PC use `--always-offload-from-vram` instead, which hands the card back to Ollama after each picture.)
 3. Save, and start **`run.bat`** again.
 4. To start it automatically: press **Win+R**, type `shell:startup`, and put a shortcut to `E:\Forge\run.bat` in that folder.
 
@@ -272,6 +310,7 @@ The helper does two jobs: pictures and research. Forge doesn't always send the p
 1. Put `iq-helper.py` and `Start Outer Realm.bat` (from the `helper` folder, placed in `E:\Forge\webui_forge_cu121_torch231\webui` next to `iq-helper.py`) in **`E:\Forge`**, next to the `webui_forge_cu121_torch231` folder.
 2. Start everything with **`Start Outer Realm.bat` (from the `helper` folder, placed in `E:\Forge\webui_forge_cu121_torch231\webui` next to `iq-helper.py`)**. It opens Forge (minimized) and a small "picture helper" window. Keep both open.
 3. In Outer Realm, the Forge address on the PC is `http://localhost:7861`. **Find it** tries it automatically.
+4. **Restarting Forge from your phone.** Settings → Images → **Restart Forge** asks the bridge to close Forge and the bridge, start both again, and keeps checking until Forge answers ("✓ Back up after 42 s"). The bridge prints a **restart token** when its window starts — paste it once on each device (it is kept on that device only, never in the synced settings). The bridge runs `restart-forge.bat` next to it, which starts `start-forge.bat` and `start-bridge.bat`; keep their arguments in step with `webui-user.bat`. It works over the Tailscale address too, so the button works on the phone.
 4. For auto-start, put a shortcut to `Start Outer Realm.bat` (from the `helper` folder, placed in `E:\Forge\webui_forge_cu121_torch231\webui` next to `iq-helper.py`) in `shell:startup`, replacing the old shortcut to `run`.
 
 **4. Phone access (Tailscale)**

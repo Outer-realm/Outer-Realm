@@ -47,9 +47,12 @@ const APP = [
   part('js/setup.js', 'const KEY_PATTERNS', '/* Reads anything:'),
   part('js/setup.js', 'function parseKeys(text)', '/* ---------- models & testing ----------'),
   part('js/setup.js', 'function keysFileContent()', 'function download('),
+  'let cardSearch = null;',   /* the real declaration from js/pals.js, which syncPals resets */
+  part('js/pals.js', 'async function syncPals(root) {', '/* one folder per shared setting'),
+  part('js/pals.js', 'async function syncWorlds(root, changed) {', 'const worldMD = '),
   file('js/sealed.js'),
   file('js/vault.js'),
-  ';globalThis.__app = { S, Vault, Sealed, Drive, keysFileContent, parseKeys, importKeys, syncNow, PRESETS };'
+  ';globalThis.__app = { S, Vault, Sealed, Drive, keysFileContent, parseKeys, importKeys, syncNow, syncPals, PRESETS };'
 ].join('\n');
 
 const FOLDER = 'https://drive.google.com/drive/folders/1H7jtaAPFoch12ejohaDg60VA-kb55xDF';
@@ -217,14 +220,28 @@ function load(drive, device, settings) {
     migrate: c => c,
     deep: o => JSON.parse(JSON.stringify(o)),
     mergeDefaults: (o, d) => ({ ...(d || {}), ...(o || {}) }),
-    openModal: () => {}
+    openModal: () => {},
+    /* companions: the data the app keeps in memory, plus the little helpers syncPals leans on */
+    PALS: { pals: {}, chats: {}, personas: {}, worlds: {}, deleted: {}, defaultPersona: '' },
+    palStamp: p => Object.values(ctx.PALS.chats || {}).filter(ch => (ch.palIds || []).includes(p.id)).reduce((m, ch) => Math.max(m, ch.updatedAt || 0), p.updatedAt || 0),
+    palFolderName: p => String(p.name || 'Companion').slice(0, 60) || 'Companion',
+    savePals: () => {},
+    palUpgrade: p => p,
+    adoptCardFolder: async () => null,
+    cardFiles: async () => [],
+    worldMD: w => '# ' + (w.name || 'Shared setting'),
+    personaMD: x => '# ' + (x.name || 'Persona'),
+    dataUrlBlob: () => null,
+    palPicBlob: async () => null,
+    personaPicBlob: async () => null,
+    picTried: new Set()
   };
   /* a signed-in device from an earlier session: the token is in localStorage, as the app stores it */
   const saved = device.store['iq.settings'];
   ctx.S = {
     settings: saved ? JSON.parse(saved) : (settings || settingsWith([])),
     vaultFound: false, vaultLocked: false, vaultAt: 0, vaultDraft: '', driveAs: '',
-    campaigns: {}, deleted: {}, view: 'home', busy: false, syncing: false, resync: false, syncStatus: '', savesLocked: false
+    campaigns: {}, deleted: {}, view: 'home', busy: false, syncing: false, resync: false, syncStatus: '', savesLocked: false, palsLocked: false
   };
   vm.createContext(ctx);
   vm.runInContext(APP, ctx, { filename: 'outer-realm (under test)' });
@@ -235,7 +252,7 @@ function load(drive, device, settings) {
   app.Drive.init();
   return {
     ctx, app,
-    get S() { return app.S; }, get Vault() { return app.Vault; }, get Drive() { return app.Drive; },
+    get S() { return app.S; }, get Vault() { return app.Vault; }, get Drive() { return app.Drive; }, get PALS() { return ctx.PALS; },
     keysFileContent: app.keysFileContent, importKeys: app.importKeys,
     toasts, confirms,
     signIns: () => signIns,
@@ -486,6 +503,129 @@ const bail = setTimeout(() => { console.error('TIMED OUT — a promise never set
   F.Vault.apply(PASS, true);
   await F.app.syncNow(true);
   is('a fresh device opens every sealed save after that re-save', !!(F.S.campaigns.camp1 && F.S.campaigns.camp1.premise === secret) && !!(F.S.campaigns.campOld && F.S.campaigns.campOld.title === 'Old Adventure'), Object.keys(F.S.campaigns).join(','));
+
+  /* ============ 7. sealed companion data ============ */
+  console.log('\n7. Sealed companion data');
+  const CHAT = 'the secret line about the lighthouse';
+  const drive4 = fakeDrive();
+  const palA = load(drive4, { store: {} }, settingsWith([]));
+  await palA.signIn();
+  palA.Vault.apply(PASS, true);
+  await palA.Vault.push();
+  palA.PALS.pals.pal1 = { id: 'pal1', name: 'Stacey Smith', updatedAt: 1000 };
+  palA.PALS.chats.chat1 = { id: 'chat1', palIds: ['pal1'], updatedAt: 1000, messages: [{ role: 'pal', text: CHAT }] };
+  const root4 = palA.Drive.root();
+  await palA.app.syncPals(root4);
+  const compsFile = () => drive4.inFolder('companions.json', drive4.all('Companions')[0].id)[0];
+  const cardFile = () => drive4.inFolder('companion.json', drive4.all('Stacey Smith')[0].id)[0];
+  is('companions.json is written sealed', /ironquill-sealed/.test(compsFile()?.content || ''), compsFile()?.content?.slice(0, 60));
+  is('the companion card is written sealed', /ironquill-sealed/.test(cardFile()?.content || ''), cardFile()?.content?.slice(0, 60));
+  is('the chat text is not readable in either file', ![compsFile(), cardFile()].some(f => ((f && f.content) || '').includes(CHAT)));
+  is('the card folder is marked as sealed', drive4.all('Stacey Smith')[0].appProperties?.iqSealed === '1', JSON.stringify(drive4.all('Stacey Smith')[0].appProperties));
+  const compsBytes = compsFile().content, cardBytes = cardFile().content;
+
+  /* a second device that knows the passphrase */
+  const palB2 = load(drive4, { store: {} }, settingsWith([]));
+  await palB2.signIn();
+  palB2.Vault.apply(PASS, true);
+  await palB2.Vault.pull({ quiet: true });
+  await palB2.app.syncPals(root4);
+  is('another device unlocks the companion and the chat', palB2.PALS.pals.pal1 && palB2.PALS.pals.pal1.name === 'Stacey Smith' && JSON.stringify(palB2.PALS.chats).includes(CHAT), Object.keys(palB2.PALS.chats).join(','));
+  is('and leaves both files exactly as they are', compsFile().content === compsBytes && cardFile().content === cardBytes);
+
+  /* a locked device holding a newer local copy */
+  const palC = load(drive4, { store: {} }, settingsWith([]));
+  await palC.signIn();
+  palC.PALS.pals.pal1 = { id: 'pal1', name: 'Stacey Smith', updatedAt: 9000 };
+  palC.PALS.chats.chat1 = { id: 'chat1', palIds: ['pal1'], updatedAt: 9000, messages: [{ role: 'pal', text: 'a local edit' }] };
+  palC.PALS.pals.pal9 = { id: 'pal9', name: 'Brand New Pal', updatedAt: 9000 };   /* a companion this folder has never seen */
+  await palC.app.syncPals(root4);
+  is('a locked device reports the companion cards as locked', palC.S.palsLocked === true);
+  is('and writes nothing over them', compsFile().content === compsBytes && cardFile().content === cardBytes);
+  is('and does not add a readable card to the sealed folder', drive4.all('Brand New Pal').length === 0);
+
+  /* plain files written by an older version */
+  const drive5 = fakeDrive();
+  const now = new Date().toISOString();
+  drive5.files.set('c5', { id: 'c5', name: 'Companions', mimeType: 'application/vnd.google-apps.folder', parents: [FOLDER], content: '', appProperties: null, modifiedTime: now, trashed: false });
+  drive5.files.set('c5json', { id: 'c5json', name: 'companions.json', mimeType: 'application/json', parents: ['c5'], content: JSON.stringify({ app: 'Outer Realm', pals: { pal2: { id: 'pal2', name: 'Emerson Cole', updatedAt: 2000 } }, chats: {}, personas: {}, worlds: {}, deleted: {} }), appProperties: null, modifiedTime: now, trashed: false });
+  drive5.files.set('p5', { id: 'p5', name: 'Emerson Cole', mimeType: 'application/vnd.google-apps.folder', parents: ['c5'], content: '', appProperties: { iqPal: 'pal2', iqUpdated: '2000' }, modifiedTime: now, trashed: false });
+  drive5.files.set('p5json', { id: 'p5json', name: 'companion.json', mimeType: 'application/json', parents: ['p5'], content: JSON.stringify({ app: 'Outer Realm', pal: { id: 'pal2', name: 'Emerson Cole', updatedAt: 2000 }, chats: [] }), appProperties: null, modifiedTime: now, trashed: false });
+
+  const noVault = load(drive5, { store: {} }, settingsWith([]));
+  await noVault.signIn();
+  await noVault.app.syncPals(FOLDER);
+  is('a device without a vault still reads plain companion data', noVault.PALS.pals.pal2?.name === 'Emerson Cole', Object.keys(noVault.PALS.pals).join(','));
+  is('and leaves the plain files readable', !/ironquill-sealed/.test(drive5.files.get('p5json').content) && !/ironquill-sealed/.test(drive5.files.get('c5json').content));
+
+  const vaulted = load(drive5, { store: {} }, settingsWith([]));
+  await vaulted.signIn();
+  vaulted.Vault.apply(PASS, true);
+  await vaulted.Vault.push();
+  await vaulted.app.syncPals(FOLDER);
+  is('the next sync with the vault seals the plain companion files in place', /ironquill-sealed/.test(drive5.files.get('p5json').content) && /ironquill-sealed/.test(drive5.files.get('c5json').content));
+  is('the companion folder keeps its name and gets the sealed mark', drive5.files.get('p5').name === 'Emerson Cole' && drive5.files.get('p5').appProperties?.iqSealed === '1');
+
+  /* ============ 8. sealed personas and shared settings ============ */
+  console.log('\n8. Sealed personas and shared settings');
+  const drive6 = fakeDrive();
+  const P = load(drive6, { store: {} }, settingsWith([]));
+  await P.signIn();
+  P.Vault.apply(PASS, true);
+  await P.Vault.push();
+  P.PALS.personas.per1 = { id: 'per1', name: 'Rowan Hale', about: 'a private note about Rowan', updatedAt: 1000 };
+  P.PALS.worlds.w1 = { id: 'w1', name: 'The Hushwood', text: 'the hidden spring', palIds: [], updatedAt: 1000 };
+  const root6 = P.Drive.root();
+  await P.app.syncPals(root6);
+  const perFile = () => drive6.inFolder('persona.json', drive6.all('Rowan Hale')[0].id)[0];
+  const perMd = () => drive6.inFolder('Persona.md', drive6.all('Rowan Hale')[0].id)[0];
+  const worldFile = () => drive6.inFolder('world.json', drive6.all('The Hushwood')[0].id)[0];
+  const worldMdFile = () => drive6.inFolder('Setting.md', drive6.all('The Hushwood')[0].id)[0];
+  is('persona.json and Persona.md are sealed', /ironquill-sealed/.test(perFile()?.content || '') && /ironquill-sealed/.test(perMd()?.content || ''), (perFile()?.content || '').slice(0, 60));
+  is('world.json and Setting.md are sealed', /ironquill-sealed/.test(worldFile()?.content || '') && /ironquill-sealed/.test(worldMdFile()?.content || ''), (worldFile()?.content || '').slice(0, 60));
+  is('the persona note and the setting text are not readable', ![perFile(), perMd(), worldFile(), worldMdFile()].some(f => { const c = (f && f.content) || ''; return c.includes('a private note about Rowan') || c.includes('the hidden spring'); }));
+  is('both folders are marked as sealed', drive6.all('Rowan Hale')[0].appProperties?.iqSealed === '1' && drive6.all('The Hushwood')[0].appProperties?.iqSealed === '1', JSON.stringify(drive6.all('The Hushwood')[0].appProperties));
+  const perBytes = perFile().content, worldBytes = worldFile().content;
+
+  const P2 = load(drive6, { store: {} }, settingsWith([]));
+  await P2.signIn();
+  P2.Vault.apply(PASS, true);
+  await P2.Vault.pull({ quiet: true });
+  await P2.app.syncPals(root6);
+  is('another device reads the persona and the setting back', P2.PALS.personas.per1?.about === 'a private note about Rowan' && P2.PALS.worlds.w1?.text === 'the hidden spring', Object.keys(P2.PALS.personas).join(',') + ' / ' + Object.keys(P2.PALS.worlds).join(','));
+  is('and leaves both files as they are', perFile().content === perBytes && worldFile().content === worldBytes);
+
+  const P3 = load(drive6, { store: {} }, settingsWith([]));
+  await P3.signIn();
+  P3.PALS.personas.per1 = { id: 'per1', name: 'Rowan Hale', about: 'local edit', updatedAt: 9000 };
+  P3.PALS.worlds.w1 = { id: 'w1', name: 'The Hushwood', text: 'local edit', palIds: [], updatedAt: 9000 };
+  await P3.app.syncPals(root6);
+  is('a locked device reports them as locked', P3.S.palsLocked === true);
+  is('and writes nothing over them', perFile().content === perBytes && worldFile().content === worldBytes);
+
+  /* plain files written before sealing existed */
+  const drive7 = fakeDrive();
+  const t0 = new Date().toISOString();
+  drive7.files.set('pr7', { id: 'pr7', name: 'Personas', mimeType: 'application/vnd.google-apps.folder', parents: [FOLDER], content: '', appProperties: { iqPersonas: '1' }, modifiedTime: t0, trashed: false });
+  drive7.files.set('per7', { id: 'per7', name: 'Casey Vale', mimeType: 'application/vnd.google-apps.folder', parents: ['pr7'], content: '', appProperties: { iqPersona: 'per7x', iqUpdated: '2000' }, modifiedTime: t0, trashed: false });
+  drive7.files.set('per7json', { id: 'per7json', name: 'persona.json', mimeType: 'application/json', parents: ['per7'], content: JSON.stringify({ app: 'Outer Realm', persona: { id: 'per7x', name: 'Casey Vale', about: 'casey says hello from the folder file', updatedAt: 2000 } }), appProperties: null, modifiedTime: t0, trashed: false });
+  drive7.files.set('per7md', { id: 'per7md', name: 'Persona.md', mimeType: 'text/markdown', parents: ['per7'], content: '# Casey Vale', appProperties: null, modifiedTime: t0, trashed: false });
+
+  const plainReader = load(drive7, { store: {} }, settingsWith([]));
+  await plainReader.signIn();
+  /* an older copy of the persona, as a plain companions.json would have left it */
+  plainReader.PALS.personas.per7x = { id: 'per7x', name: 'Casey Vale', about: 'a stale local copy', updatedAt: 1000 };
+  await plainReader.app.syncPals(FOLDER);
+  is('a device without a vault still reads a plain persona file', plainReader.PALS.personas.per7x?.about === 'casey says hello from the folder file', plainReader.PALS.personas.per7x?.about);
+  is('and leaves it readable', !/ironquill-sealed/.test(drive7.files.get('per7json').content) && drive7.files.get('per7md').content === '# Casey Vale');
+
+  const keyed = load(drive7, { store: {} }, settingsWith([]));
+  await keyed.signIn();
+  keyed.Vault.apply(PASS, true);
+  await keyed.Vault.push();
+  await keyed.app.syncPals(FOLDER);
+  is('the next sync with the vault seals the plain persona files in place', /ironquill-sealed/.test(drive7.files.get('per7json').content) && /ironquill-sealed/.test(drive7.files.get('per7md').content));
+  is('and the persona folder keeps its name and gets the mark', drive7.files.get('per7').name === 'Casey Vale' && drive7.files.get('per7').appProperties?.iqSealed === '1');
 
   /* ---------- verdict ---------- */
   const failed = results.filter(r => !r.ok);

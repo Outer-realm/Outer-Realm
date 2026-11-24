@@ -17,7 +17,8 @@
    client-side, and the pictures are separate files.
    ========================================================================= */
 const SEAL_KIND = 'ironquill-sealed';
-const SEAL_FILES = ['campaign.json', 'Character Sheet.md', 'Story Log.md'];
+const SEAL_FILES = ['campaign.json', 'Character Sheet.md', 'Story Log.md', 'companions.json', 'companion.json',
+  'persona.json', 'Persona.md', 'world.json', 'Setting.md'];
 
 const s64 = buf => { const b = new Uint8Array(buf); let s = ''; for (let i = 0; i < b.length; i++) s += String.fromCharCode(b[i]); return btoa(s); };
 const su64 = s => { const bin = atob(String(s || '')); const out = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i); return out; };
@@ -61,6 +62,11 @@ const Sealed = {
     if (!sealedIs(text)) return text;
     if (!this.key) { const e = new Error('This device has not unlocked the vault that seals it.'); e.locked = true; throw e; }
     return sealedRead(text, this.key);
+  },
+  /* a card or save file -> { data } (sealed or plain), or { locked } when it is sealed and this device is not */
+  async card(text) {
+    if (sealedIs(text) && !this.key) return { locked: true };
+    try { return { data: JSON.parse(await this.read(text)) }; } catch (e) { if (e.locked) return { locked: true }; throw e; }
   },
   /* what to upload under a save file's name: sealed once this device holds the vault's key */
   file(name, text) { return SEAL_FILES.includes(name) && this.key ? sealedText(text, this.key) : Promise.resolve(text); }

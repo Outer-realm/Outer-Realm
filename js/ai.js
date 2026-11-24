@@ -142,6 +142,76 @@ function fitContext(messages, ctx, maxOut) {
   return out;
 }
 function aiError(msg, status, retry) { const e = new Error(msg); e.status = status; e.retry = retry; return e; }
+
+/* =========================================================================
+   Ollama on a 6 GB card: model roles, the two content modes, /api/chat
+   ========================================================================= */
+const OLLAMA_ROLES = {
+  sfwChat: 'gemma3:4b', sfwRich: 'gemma4:e2b-it-qat', sfwLogic: 'qwen3.5:4b',
+  nsfwChat: 'huihui_ai/qwen3.5-abliterated:4b', nsfwHeavy: 'dolphin3:latest'
+};
+const OLLAMA_SFW = [OLLAMA_ROLES.sfwChat, OLLAMA_ROLES.sfwRich, OLLAMA_ROLES.sfwLogic];
+const OLLAMA_NSFW = [OLLAMA_ROLES.nsfwChat, OLLAMA_ROLES.nsfwHeavy];
+const ollamaApiBase = url => String(url || '').trim().replace(/\/+$/, '').replace(/\/v1$/, '');
+/* Which face the request is wearing: 'companion' (texting a companion) or 'game' (the GM table).
+   The two entry points that know the content rating set it, so every helper call inside them agrees. */
+function aiContext(scope, nsfw) { S.aiScope = scope === 'companion' ? 'companion' : 'game'; S.aiNsfw = !!nsfw; }
+/* NSFW is the app's own rule: an M-rated adventure, or a companion with adult content turned on.
+   The system prompt already carries that rule (contentRules), so this only decides which model answers. */
+const ollamaNsfw = () => !!S.aiNsfw;
+/* A SFW 4B model is swapped for the uncensored one on an adult scene; dolphin3 (or the abliterated model)
+   is the player's own choice and is left alone. */
+function ollamaModelFor(conn, asked) {
+  const pin = String(asked || conn?.model || '').trim();
+  if (!ollamaNsfw() || !OLLAMA_SFW.includes(pin)) return pin;
+  return OLLAMA_ROLES.nsfwChat;
+}
+/* 4K is the whole budget of a 3.3–4.3 GB model on 6 GB. Only the smallest game models can afford 6K. */
+function ollamaCtxFor(model) {
+  if ((S.aiScope || 'game') === 'companion') return 4096;
+  if (/gemma4:e2b|dolphin3/i.test(String(model))) return 4096;
+  return 6144;
+}
+const OLLAMA_HAVE = new Set();
+/* the adult model may not be pulled yet: install it once, before the first request that needs it,
+   showing the download's own progress on the toast (it is several GB the first time) */
+async function ollamaPull(base, name) {
+  const want = String(name).replace(/:latest$/, '');
+  if (OLLAMA_HAVE.has(want)) return true;
+  try {
+    const j = await (await fetch(base + '/api/tags')).json();
+    if ((j.models || []).some(m => String(m.name || '').replace(/:latest$/, '') === want)) { OLLAMA_HAVE.add(want); return true; }
+  } catch { return false; }
+  const label = `Downloading ${name} for adult scenes — once only`;
+  try {
+    toast(label + '…', 600000);
+    const r = await fetch(base + '/api/pull', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, stream: true }) });
+    if (!r.ok) { toast(`Couldn't download ${name}. Using a model you already have for this scene.`, 9000); return false; }
+    const seen = {}; let buf = '';
+    const note = line => {
+      let j; try { j = JSON.parse(line); } catch { return; }
+      if (j.error) throw new Error(typeof j.error === 'string' ? j.error : 'download failed');
+      if (j.status === 'success') { toast(`Downloaded ${name}.`, 5000); return; }
+      if (!j.total) { toast(`${label} — ${j.status || 'working'}…`, 600000); return; }
+      seen[j.digest || 'one'] = { c: num(j.completed), t: num(j.total) || 1 };
+      const c = Object.values(seen).reduce((a, x) => a + x.c, 0), t = Object.values(seen).reduce((a, x) => a + x.t, 0);
+      toast(`${label} — ${Math.min(99, Math.round(c / t * 100))}%`, 600000);
+    };
+    if (r.body) {
+      const rd = r.body.getReader(); const dec = new TextDecoder();
+      while (true) {
+        const { value, done } = await rd.read(); if (done) break;
+        buf += dec.decode(value, { stream: true });
+        let i; while ((i = buf.indexOf('\n')) >= 0) { note(buf.slice(0, i).trim()); buf = buf.slice(i + 1); }
+      }
+      if (buf.trim()) note(buf.trim());
+    } else await r.json().catch(() => ({}));
+    OLLAMA_HAVE.add(want); return true;
+  } catch (e) {
+    toast(`Couldn't download ${name}: ${e.message || e}. Using a model you already have for this scene.`, 9000);
+    return false;
+  }
+}
 async function chatOne(conn, messages, { stream = false, onToken, signal, maxTokens, temperature, model, json, frequencyPenalty, timeout } = {}) {
   const t = S.settings.text;
   const headers = { 'Content-Type':'application/json' };
@@ -149,18 +219,35 @@ async function chatOne(conn, messages, { stream = false, onToken, signal, maxTok
   if (conn.preset === 'openrouter') { headers['X-Title'] = APP; if (/^https?:/.test(location.origin)) headers['HTTP-Referer'] = location.origin; }
   if (/anthropic\.com/.test(conn.baseUrl)) headers['anthropic-dangerous-direct-browser-access'] = 'true';
   const maxOut = maxTokens ?? num(t.maxTokens || 1000);
-  messages = fitContext(messages, conn.ctx || PRESETS[conn.preset]?.ctx || 0, maxOut);
-  const body = { model: (model || conn.model).trim(), messages, temperature: temperature ?? Number(t.temperature ?? 0.85), max_tokens: maxOut, stream };
-  /* thinking models (Nemotron, DeepSeek R1, Qwen3…) can spend the whole token budget thinking: keep it short on OpenRouter, and leave room */
-  if (json && (conn.preset === 'gemini' || conn.preset === 'ollama')) body.response_format = { type: 'json_object' };
-  /* small JSON steps can fall into a token loop, which Ollama aborts as a 500; a light penalty breaks it */
-  if (frequencyPenalty != null) body.frequency_penalty = frequencyPenalty;
-  /* Ollama turns thinking ON by default for Qwen3.5 and other reasoning models over /v1, and the hidden
-     reasoning eats the whole reply budget before the first word of the scene appears. "none" switches it
-     off (Ollama 0.20+); models without thinking, and older builds, ignore the field. */
-  if (conn.preset === 'ollama') body.reasoning_effort = 'none';
-  if (conn.preset === 'openrouter') { body.reasoning = { effort: 'low', exclude: true }; body.max_tokens = maxOut + 1200; }
-  if (conn.preset === 'gemini' && /gemini-[3-9]|gemini-.*latest/.test(body.model)) { body.reasoning_effort = 'low'; body.max_tokens = maxOut + 1200; }
+  const temp = temperature ?? Number(t.temperature ?? 0.85);
+  /* Ollama gets its own endpoint: /api/chat takes real options (num_ctx, repeat_penalty), which is the only
+     way to keep a 4B model and its whole context inside 6 GB. Everything else stays OpenAI-compatible. */
+  const local = conn.preset === 'ollama';
+  const asked = String(model || conn.model || '').trim();
+  const base = local ? ollamaApiBase(conn.baseUrl) : '';
+  let sendModel = local ? ollamaModelFor(conn, asked) : asked;
+  /* the adult model is pulled on first use; if that download fails, answer with the model the player picked */
+  if (local && sendModel !== asked && !(await ollamaPull(base, sendModel))) sendModel = asked;
+  const ctx = local ? ollamaCtxFor(sendModel) : (conn.ctx || PRESETS[conn.preset]?.ctx || 0);
+  messages = fitContext(messages, ctx, maxOut);
+  let url, body;
+  if (local) {
+    const options = { temperature: temp, repeat_penalty: 1.12, num_ctx: ctx, num_predict: maxOut };
+    if (frequencyPenalty != null) options.frequency_penalty = frequencyPenalty;
+    /* think:false keeps a reasoning build (qwen3.5) from spending the whole reply budget on a monologue;
+       it answers in character at once, which is what a companion chat and a JSON rule step both need */
+    body = { model: sendModel, messages, stream, keep_alive: '10m', think: false, options };
+    if (json) body.format = 'json';
+    url = base + '/api/chat';
+  } else {
+    body = { model: asked, messages, temperature: temp, max_tokens: maxOut, stream };
+    if (json && conn.preset === 'gemini') body.response_format = { type: 'json_object' };
+    /* small JSON steps can fall into a token loop; a light penalty breaks it */
+    if (frequencyPenalty != null) body.frequency_penalty = frequencyPenalty;
+    if (conn.preset === 'openrouter') { body.reasoning = { effort: 'low', exclude: true }; body.max_tokens = maxOut + 1200; }
+    if (conn.preset === 'gemini' && /gemini-[3-9]|gemini-.*latest/.test(body.model)) { body.reasoning_effort = 'low'; body.max_tokens = maxOut + 1200; }
+    url = conn.baseUrl.trim().replace(/\/+$/, '') + '/chat/completions';
+  }
   let res; let full = '';
   /* Nothing waits forever. A stalled request, or a stream that goes silent halfway through a sentence,
      is cut off and reported as retryable, so the fallback connection or Retry can act at once instead of
@@ -174,10 +261,10 @@ async function chatOne(conn, messages, { stream = false, onToken, signal, maxTok
   const armIdle = () => { clearTimeout(idleTm); idleTm = setTimeout(() => { cut = cut || 'idle'; ctl.abort(); }, idleMs); };
   const hardTm = setTimeout(() => { cut = cut || 'hard'; ctl.abort(); }, hardMs);
   try {
-  try { res = await fetch(conn.baseUrl.trim().replace(/\/+$/, '') + '/chat/completions', { method:'POST', headers, body: JSON.stringify(body), signal: ctl.signal }); }
+  try { res = await fetch(url, { method:'POST', headers, body: JSON.stringify(body), signal: ctl.signal }); }
   catch (e) { if (e.name === 'AbortError') throw e; throw aiError(`Couldn't reach ${conn.label}. ` + (conn.preset === 'ollama' ? 'Is Ollama running with OLLAMA_ORIGINS="*"? ' : 'Check your connection, or this provider may not allow browser apps.'), 0, true); }
   if (!res.ok) {
-    let msg = ''; try { const j = await res.json(); msg = j.error?.message || j.message || JSON.stringify(j); } catch { try { msg = await res.text(); } catch {} }
+    let msg = ''; try { const j = await res.json(); msg = (typeof j.error === 'string' ? j.error : j.error?.message) || j.message || JSON.stringify(j).slice(0, 200); } catch { try { msg = await res.text(); } catch {} }
     const hint = conn.preset === 'ollama' && res.status === 403 ? ' (Ollama refused this address — set OLLAMA_HOST = 0.0.0.0:11434 on the PC and restart Ollama)' : res.status === 401 || res.status === 403 ? ' (check the key)' : res.status === 429 ? ' (rate-limited — free limits reset soon)' : res.status === 402 ? ' (out of free credit)' : res.status === 404 ? ' (model not found — pick another)' : '';
     throw aiError(`${conn.label} error ${res.status}${hint}: ${String(msg).slice(0, 240)}`, res.status, [401, 402, 403, 404, 408, 429, 500, 502, 503, 504, 529].includes(res.status));
   }
@@ -191,6 +278,15 @@ async function chatOne(conn, messages, { stream = false, onToken, signal, maxTok
     let i;
     while ((i = buf.indexOf('\n')) >= 0) {
       const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1);
+      /* /api/chat streams one JSON object per line; OpenAI-style servers stream `data:` frames */
+      if (local) {
+        if (!line) continue;
+        try { const j = JSON.parse(line);
+          if (j.error) throw new Error('AI error: ' + (typeof j.error === 'string' ? j.error : j.error.message || 'request failed'));
+          const piece = j.message?.content || ''; if (piece) { full += piece; onToken && onToken(full); } }
+        catch (e) { if (String(e.message).startsWith('AI error')) throw e; }
+        continue;
+      }
       if (!line.startsWith('data:')) continue;
       const data = line.slice(5).trim(); if (!data || data === '[DONE]') continue;
       try { const j = JSON.parse(data); if (j.error) throw new Error('AI error: ' + (j.error.message || JSON.stringify(j.error)));
@@ -270,8 +366,8 @@ const stripSpeakerTags = t => String(t || '').replace(/\{[^{}\n]{1,40}\}(?=\s*[�
 function md(t) {
   return stripSpeakerTags(t).trim().split(/\n{2,}/).map(p => '<p>' + esc(p)
     .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-    .replace(/(^|[^*\w])\*(?!\s)([^*\n]+?)\*(?!\w)/g, '$1<em>$2</em>')
-    .replace(/(^|[\s(])_(?!\s)([^_\n]+?)_(?=$|[\s.,!?)])/g, '$1<em>$2</em>')
+    .replace(/(^|[^*\w])\*(?!\s)([^*\n]+?)\*(?!\w)/g, '$1<em class="act">$2</em>')
+    .replace(/(^|[\s(])_(?!\s)([^_\n]+?)_(?=$|[\s.,!?)])/g, '$1<em class="think">$2</em>')
     .replace(/\[([A-Z][^\]\n]{1,140})\]/g, '<span class="sys">[$1]</span>')
     .replace(/\n/g, '<br>') + '</p>').join('');
 }
@@ -315,6 +411,8 @@ PLAYER AGENCY — THE MOST IMPORTANT RULE
 
 STORY
 - Narrate in second person ("you"), present tense, vivid but tight: usually 2-4 short paragraphs. Give NPCs distinct voices and real dialogue.
+- Make the place and the people in it concrete: what the player sees, hears and smells, and how each NPC answers, moves and looks. Track the player's choices, stats, gear and standing positions as the sheet above reports them, and never contradict them.
+- Plain prose only: no bullet points, no numbered lists, no headers, no bold labels, no "What do you do?" line. Close on a clear moment the player can act on.
 - PINNED FACTS are always true: never contradict them.
 - Use the WORLD notes for places, factions and characters. GM SECRETS are hidden truths: never state them outright; let the player uncover them through play.
 - The world reacts honestly; danger is real; reward clever ideas. Stay consistent with the character sheet, memory and story so far.
@@ -424,6 +522,7 @@ function sheetText(c) {
   return lines.filter(Boolean).join('\n');
 }
 function buildMessages(c) {
+  aiContext('game', normRating(c.rating) === 'M');   /* an M adventure may use the uncensored model */
   const sys = [GM_RULES, '', personaText(c), '', magicRule(c), '',
     'CAMPAIGN', `Title: ${c.title}`, `Genre/setting: ${c.genre || 'open'}`, `Premise: ${c.premise}`, `Tone: ${c.tone || 'GM\'s choice'}`, `Content rating: ${c.rating || 'PG-13'} — ${contentRules(c.rating, c)}`,
     '', 'PLAYER CHARACTER', sheetText(c)];
@@ -541,7 +640,8 @@ HOW TO WRITE A TURN
 DIALOGUE AND VOICES (the app reads the story aloud, with a different voice for each character)
 - Put ONLY words spoken out loud inside double quotes "like this".
 - Right before each opening quote, write the speaker's name in curly braces: {Name}"Their words." The braces are hidden from the player. Tag every quote, even several from the same speaker. For an unnamed speaker use a short label: {Guard}"Halt!"
-- Names, titles, labels and special terms are never in double quotes: write blessed water or *blessed water*, never "blessed water". Thoughts, signs and written words go in *italics*.
+- Actions, gestures and expressions go in *asterisks*. Inner thoughts, signs and written words go in _underscores_.
+- Names, titles, labels and special terms are never in double quotes: write blessed water, never "blessed water".
 - Format: Narration. {Speaker A}"Spoken words." More narration. {Speaker B}"Their reply." {Speaker B}"More from the same speaker, tagged again."`;
 }
 function writerModules(c) {

@@ -315,7 +315,7 @@ async function testConn(conn) {
 const STORY_ONLY = /wayfarer|rocinante|celeste|nemomix|magnum|mn-12b|unslop/i;
 /* dolphin3 first: small, no thinking step, and the most reliable at the JSON rule steps.
    The rest are fall-backs in size order, so a 4B/effective-4B model is never passed over for a 9B. */
-const HELPER_PICK = [/^dolphin3/i, /^dolphin/i, /^hermes3/i, /qwen3\.5:4b/i, /gemma4:e4b/i, /qwen3\.5/i, /qwen3/i, /^qwen/i, /gemma4/i, /^llama3/i];
+const HELPER_PICK = [/^dolphin3/i, /^dolphin/i, /^hermes3/i, /qwen3\.5:4b/i, /gemma4:e4b/i, /gemma4:e2b/i, /^gemma3:4b/i, /qwen3\.5/i, /qwen3/i, /^qwen/i, /gemma4/i, /^llama3/i];
 async function autoPair(conn) {
   if (conn.preset !== 'ollama' || conn.id !== S.settings.ai.active) return;
   const ai = S.settings.ai;

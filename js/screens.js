@@ -387,7 +387,7 @@ function settingsHTML() {
       ${im.mode === 'local' ? forgeSettingsHTML() : ''}
       ${im.mode === 'template' ? bindInput('image.template', 'Image URL template', { ph:'https://my-server/img?prompt={prompt}&seed={seed}', hint:'Placeholders: {prompt} {seed} {width} {height}.' }) : ''}
       <label class="f"><span>Image shape</span><select data-bind="image.size">${Object.keys(SIZES).map(k => `<option value="${k}" ${im.size === k ? 'selected' : ''}>${k[0].toUpperCase() + k.slice(1)}${im.mode === 'local' ? '' : ` (${SIZES[k].join('×')})`}</option>`).join('')}</select></label>
-      ${im.mode === 'local' ? `<label class="f"><span>Picture size on your PC</span><select data-bind="image.forgeRes"><option value="fast" ${(im.forgeRes || 'fast') === 'fast' ? 'selected' : ''}>Fast: 768×768 for square (about twice as quick)</option><option value="full" ${im.forgeRes === 'full' ? 'selected' : ''}>Full detail: 1024×1024 for square</option></select></label>` : ''}
+      ${im.mode === 'local' ? `<label class="f"><span>Picture size on your PC</span><select data-bind="image.forgeRes"><option value="fast" ${(im.forgeRes || 'full') === 'fast' ? 'selected' : ''}>Fast: three-quarter size (about twice as quick)</option><option value="full" ${(im.forgeRes || 'full') === 'full' ? 'selected' : ''}>Full detail: the SDXL-native size above (896×1152 portrait)</option></select></label>` : ''}
       ${im.mode !== 'off' ? bindCheck('image.scenes', 'Paint scene pictures automatically (new places, important moments). Off: only portraits, photos you ask for and Illustrate.') : ''}
       ${im.mode !== 'off' ? bindCheck('image.autoPortraits', 'Paint a portrait automatically for every new companion and named character the GM brings in') : ''}
       ${bindInput('image.style', 'Default art style', { ph:'painterly fantasy illustration, cinematic lighting', hint:'Each adventure can override this in its Journal.' })}
@@ -470,10 +470,28 @@ function modelGroups(c) {
   const free = id => info.find(m => m.id === id)?.free && !/:free$/.test(id);
   return { rec, story, rest, free };
 }
+/* What each local model is best at, shown next to it so the roster reads as roles, not file names.
+   First match wins; a model nobody knows gets no tags rather than a wrong one. */
+const OLLAMA_TAGS = [
+  [/qwen3\.5-abliterated|qwen3-abliterated/i, ['NSFW', 'D&D']],
+  [/gemma3-abliterated/i, ['NSFW', 'Companion']],
+  [/^dolphin/i, ['NSFW', 'Roleplay']],
+  [/wayfarer/i, ['Story', 'Uncensored']],
+  [/coder|code[-_]?qwen|starcoder/i, ['Helper', 'Code']],
+  [/gemma4:e2b|gemma4:e4b/i, ['SFW', 'Story']],
+  [/gemma3:4b/i, ['SFW', 'Companion']],
+  [/qwen3\.5:4b/i, ['SFW', 'D&D']],
+  [/qwen3\.5:9b|qwen3:8b|qwen3:14b/i, ['Story', 'SFW']],
+  [/hermes/i, ['Story', 'Uncensored']],
+  [/^gemma/i, ['Story', 'SFW']],
+  [/llama|mistral|nemo|phi/i, ['Story']]
+];
+const modelTags = id => (OLLAMA_TAGS.find(([re]) => re.test(String(id || ''))) || [null, []])[1];
 function modelListHTML(c) {
   const q = String(S.modelQ || '').toLowerCase().trim(); const g = modelGroups(c);
   const f = list => list.filter(id => !q || id.toLowerCase().includes(q));
-  const row = (id, good) => `<button class="mrow ${good ? 'good' : ''} ${id === c.model ? 'cur' : ''}" data-act="modelset" data-id="${c.id}" data-m="${esc(id)}">${good ? '★ ' : ''}${esc(id)}${g.free(id) ? '<small>free</small>' : ''}${id === c.model ? '<small>in use</small>' : ''}</button>`;
+  const tags = id => c.preset === 'ollama' ? modelTags(id) : [];
+  const row = (id, good) => `<button class="mrow ${good ? 'good' : ''} ${id === c.model ? 'cur' : ''}" data-act="modelset" data-id="${c.id}" data-m="${esc(id)}">${good ? '★ ' : ''}${esc(id)}${tags(id).length ? `<span class="mtags">${tags(id).map(t => `<i class="mtag">${esc(t)}</i>`).join('')}</span>` : ''}${g.free(id) ? '<small>free</small>' : ''}${id === c.model ? '<small>in use</small>' : ''}</button>`;
   const sec = (label, list, good) => f(list).length ? `<div class="mgrp">${label}</div>${f(list).map(id => row(id, good)).join('')}` : '';
   const all = [...g.rec, ...g.story, ...g.rest];
   const body = (c.modelsLoading && !all.length ? '<p class="hint">Loading models…</p>' : '')

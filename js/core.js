@@ -145,7 +145,8 @@ const PRESETS = {
   pollinations:{ label:'Pollinations', short:'Pollinations', baseUrl:'https://gen.pollinations.ai/v1', key:true, keyUrl:'https://enter.pollinations.ai', defaultModel:'openai',
     pick:[/^openai$/, /^openai-large$/, /^mistral/, /^deepseek/, /./], note:'Paid with Pollen credits since Nov 2026; needs a secret sk_ key (pk_ keys no longer generate). Free scene images need no key.' },
   ollama:     { label:'Ollama (my own computer)', short:'Ollama', baseUrl:'http://localhost:11434/v1', key:false, keyUrl:'https://ollama.com/download', ctx:12288,
-    pick:[/wayfarer/i, /qwen3\.5-abliterated/i, /^qwen3\.5/, /^gemma4/, /^qwen3/, /^mistral-nemo/, /^dolphin/, /^llama/, /./],
+    /* bigger storytellers first; the 4B trio (a 6 GB card's whole budget) only once nothing larger is installed */
+    pick:[/wayfarer/i, /qwen3\.5-abliterated/i, /^qwen3\.5(?!:4b)/i, /^gemma4(?!:e2b)/i, /^qwen3(?!\.5:4b)/i, /^mistral-nemo/, /^dolphin/, /^llama/, /^qwen3\.5:4b/i, /^gemma4:e2b/i, /^gemma3:4b/i, /^gemma3/i, /./],
     note:'Free, unlimited and private. On this PC use http://localhost:11434/v1; from your phone use your Tailscale address + /v1. Wayfarer 12B still writes the best scenes; an uncensored Qwen3.5 9B is the modern, quicker pick on 8 GB.' },
   custom:     { label:'Custom (OpenAI-compatible)', short:'Custom', baseUrl:'', key:false, pick:[/./], note:'LM Studio, KoboldCpp, text-generation-webui, a relay you host, etc.' }
 };
@@ -174,7 +175,7 @@ const SCENARIOS = [
 const DEFAULT_SETTINGS = {
   text: { temperature:0.85, maxTokens:1000, stream:true, streamV2:true, length:'long', lenV2:true },
   ai:   { conns: [], active:'', fallback:true, deliberate:true, verify:true, referee:true, dice:'normal', people:true, agency:true, profile:'balanced', helperModel:'', helperAuto:'', builder:'auto', bump:true },
-  image:{ mode:'pollinations', polliKey:'', polliModel:'flux', size:'square', style:'', template:'', forgePreset:'auto', forgeModel:'', forgeModelSfw:'', forgeModelNsfw:'', forgeShare:true, forgeNeg:'', autoPortraits:true, driveSave:true, scenes:true, forgeRes:'fast', refPhotos:true, refWeight:0.7,
+  image:{ mode:'pollinations', polliKey:'', polliModel:'flux', size:'portrait', style:'', template:'', forgePreset:'auto', forgeModel:'', forgeModelSfw:'', forgeModelNsfw:'', forgeCheckpoint:'', speedLora:false, forgeShare:true, forgeNeg:'', autoPortraits:true, driveSave:true, scenes:true, forgeRes:'full', refPhotos:true, refWeight:0.7,
     /* added to every picture; edit or clear these in Settings → Images */
     look:'soft diffused lighting, clean natural skin texture, detailed photograph',
     avoid:'film grain, noise, gritty texture, oversharpened, rough skin texture, low quality, compression artifacts' },

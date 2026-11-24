@@ -239,7 +239,12 @@ a.btn{text-decoration:none;color:var(--ink);display:inline-flex;align-items:cent
 .fmtbtn{border:1px solid var(--line);background:var(--panel2);color:var(--ink);border-radius:10px;padding:6px 10px;font-size:13px;font-weight:600}
 .fmtbtn:hover{border-color:var(--accent)}
 .fmthint{color:var(--muted);font-size:12px;margin-left:auto}
-.msg.player .b .tact{color:#cfc8ff;font-style:italic}
+/* marked-up text: actions are red, inner thoughts yellow, plain speech stays the normal ink */
+em.act{color:var(--red);font-style:italic}
+em.think{color:var(--gem);font-style:italic}
+.pmsg.me .bub em.act{color:#ffd9de}
+.pmsg.me .bub em.think{color:#ffeab5}
+.msg.player .b .tact{color:var(--red);font-style:italic}
 .msg.player .b .tooc{color:var(--muted);font-size:.9em}
 @media(max-width:560px){.fmthint{display:none}}
 
@@ -286,6 +291,8 @@ a.btn{text-decoration:none;color:var(--ink);display:inline-flex;align-items:cent
 .mrow.good{color:#4ade80}
 .mrow.cur{background:#25235c}
 .mrow small{margin-left:auto;flex:none;font-size:11px;color:var(--muted);border:1px solid var(--line);border-radius:999px;padding:1px 7px}
+.mrow .mtags{display:inline-flex;gap:4px;margin-left:6px;flex:none;align-items:center}
+.mrow .mtag{font-style:normal;font-size:10px;letter-spacing:.02em;color:var(--gold2);white-space:nowrap;border:1px solid var(--line);border-radius:999px;padding:1px 6px;line-height:1.5}
 
 /* ================= Companions ================= */
 .palhero{max-width:720px}
@@ -356,7 +363,7 @@ a.btn{text-decoration:none;color:var(--ink);display:inline-flex;align-items:cent
 .btime{font-size:11px;color:var(--muted);padding:0 6px}
 .pwho{display:flex;align-items:center;gap:8px;margin-bottom:6px;color:var(--gold2);font-size:13px}
 .pwho.sm{margin:0 0 2px 40px;font-size:12px}
-.palphoto{max-width:260px;width:100%;border-radius:14px;display:block}
+.palphoto{max-width:480px;width:100%;height:auto;object-fit:contain;border-radius:14px;display:block}
 .typing{display:inline-flex;gap:4px;align-items:center}
 .typing i{width:7px;height:7px;border-radius:50%;background:var(--muted);animation:blink 1.2s infinite}
 .typing i:nth-child(2){animation-delay:.2s}.typing i:nth-child(3){animation-delay:.4s}
@@ -365,7 +372,6 @@ a.btn{text-decoration:none;color:var(--ink);display:inline-flex;align-items:cent
 .pmsg.pscene.me{background:#1c1b48;border-color:#3b3580;margin-left:12%}
 .pmsg.pscene.them{margin-right:4%}
 .pmsg.pscene .ptext{font-size:15.5px;line-height:1.6}
-.pmsg.pscene .ptext em{color:#c8c2ff}
 .pmsg.pscene .palphoto{margin-bottom:8px;max-width:100%}
 .palcomp{border-top:1px solid var(--line);padding:8px 12px calc(10px + env(safe-area-inset-bottom));background:rgba(10,12,32,.9)}
 .palquick{display:flex;gap:6px;overflow-x:auto;padding-bottom:6px}
@@ -405,12 +411,12 @@ button.plain{border:none;background:none;padding:0;color:inherit;cursor:zoom-in;
 .palsys .link{margin-left:6px}
 
 /* photos in a chat */
-.palphotow{position:relative;width:260px;max-width:100%;min-height:150px;border-radius:14px;overflow:hidden;background:var(--panel2);border:1px solid var(--line)}
+.palphotow{position:relative;width:min(100%,480px);min-height:150px;border-radius:14px;overflow:hidden;background:var(--panel2);border:1px solid var(--line)}
 .palphotow .ph{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;padding:10px;text-align:center;font-size:13px;color:var(--muted)}
-.palphotow img.palphoto{display:block;width:100%;max-width:none;border-radius:0;opacity:0;transition:opacity .5s;cursor:zoom-in}
+.palphotow img.palphoto{display:block;width:100%;height:auto;object-fit:contain;max-width:none;border-radius:0;opacity:0;transition:opacity .5s;cursor:zoom-in}
 .palphotow img.palphoto.ld{opacity:1}
 .palphoto.wait{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;width:260px;max-width:100%;min-height:120px;border:1px dashed var(--line);background:var(--panel2);font-size:13px;color:var(--muted)}
-.pmsg.pscene .palphotow{margin-bottom:8px;width:min(100%,420px)}
+.pmsg.pscene .palphotow{margin-bottom:8px;width:min(100%,480px)}
 .scene img.ld{cursor:zoom-in}
 
 /* the large picture view */
