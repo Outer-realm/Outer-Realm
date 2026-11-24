@@ -13,6 +13,7 @@ const POS_SAFE = 'candid photo, natural lighting, detailed skin texture, 8k uhd'
 const POS_NSFW = 'uncensored, raw photo, realistic anatomy, detailed skin texture, natural lighting';
 const NEG_QUALITY = '(worst quality, low quality, blurry:1.2), (bad anatomy, bad hands, fused fingers, extra fingers:1.1), deformed eyes, deformed face, watermark, text, signature';
 const SPEED_LORA = { xl: '<lora:dmd2_sdxl_4step_lora:1>', '15': '<lora:sdxl_lightning_4step_lora:1>' };
+const FORGE_FAST_MODEL = /lightning|turbo|hyper|dmd|lcm/i;
 /* the standing additions from Settings → Images, on every picture */
 function picLook() { return String(S.settings.image.look || '').replace(/\s+/g, ' ').trim().slice(0, 300); }
 function picAvoid() { return String(S.settings.image.avoid || '').replace(/\s+/g, ' ').trim().slice(0, 400); }
@@ -68,6 +69,7 @@ function autoAssignModels() {
     im.forgeCheckpoint = all.find(m => /realvis.*lightning/i.test(m)) || all.find(m => /lightning|turbo|hyper|dmd|lcm/i.test(m)) || (all.includes(im.forgeModelSfw) ? im.forgeModelSfw : '') || all[0] || keep;
   }
   if (im.forgeCheckpoint) im.forgeModelSfw = im.forgeCheckpoint;
+  if (forgePresetNeedsAuto(im.forgeCheckpoint || im.forgeModelSfw)) im.forgePreset = 'auto';
   saveSettings();
 }
 /* Distilled builds paint in a handful of steps; a standard SDXL build gets the usual 25. The speed LoRA
@@ -98,13 +100,24 @@ function pickForgeModel(c, prompt, subject = null, wanted = '') {
   return { model, safe: !adult, kind: adult ? 'nsfw' : 'sfw' };
 }
 /* "Auto" reads the model's file name: Lightning/Turbo/Hyper/DMD/LCM models need few steps; anything else gets the standard SDXL settings */
-function forgePresetKey(model) {
+function forgePresetKey(model, ignoreManual = false) {
   const s = S.settings.image; const k = s.forgePreset || 'auto';
-  if (k !== 'auto' && FORGE_PRESETS[k]) return k;
+  if (!ignoreManual && k !== 'auto' && FORGE_PRESETS[k]) return k;
   const m = String(model ?? picCheckpoint());
-  if (/lightning|turbo|hyper|dmd|lcm/i.test(m)) return 'lightning';
+  if (FORGE_FAST_MODEL.test(m)) return 'lightning';
   if (/sd[-_ ]?1\.?5|sd15|v1-5|realistic[-_ ]?vision/i.test(m)) return 'sd15';
   return m ? 'sdxl' : 'lightning';
+}
+/* A saved Lightning preset stops being valid when a standard SDXL checkpoint is selected. Switch it to Auto
+   so Settings shows the preset that is actually used (and the next picture gets the right steps and LoRA). */
+function forgePresetNeedsAuto(model = picCheckpoint()) {
+  return (S.settings.image.forgePreset || 'auto') === 'lightning' && !!String(model || '').trim() && !FORGE_FAST_MODEL.test(String(model));
+}
+function normalizeForgePreset(save = true) {
+  if (!forgePresetNeedsAuto()) return false;
+  S.settings.image.forgePreset = 'auto';
+  if (save) saveSettings(false);
+  return true;
 }
 const forgeUrl = () => String(LS.get('iq.forgeUrl', '') || 'http://localhost:7861').trim().replace(/\/+$/, '');
 /* Forge names a loaded checkpoint without the "[hash]" its model list adds, so compare the plain file name */
@@ -176,10 +189,17 @@ const IDB = {
   async put(k, v) { try { const db = await this.open(); await new Promise(res => { const t = db.transaction('img', 'readwrite'); t.objectStore('img').put(v, k); t.oncomplete = res; t.onerror = res; }); } catch {} }
 };
 function forgeJob(prompt, seed, c, neg = '', ref = null, subject = null, model = '', forced = '') {
-  const s = S.settings.image; const pick = pickForgeModel(c, prompt, subject, model); const pk = forgePresetKey(pick.model); const P = FORGE_PRESETS[pk];
+  const s = S.settings.image; const pick = pickForgeModel(c, prompt, subject, model);
+  /* A saved "Lightning" preset can outlive the Lightning checkpoint it was picked for. Running a standard
+     SDXL build at 6 steps / CFG 1.5 turns it into colour noise (often a red static frame), so fall back to
+     the model's own settings instead of trusting a stale preset. */
+  const staleLightning = forgePresetNeedsAuto(pick.model);
+  const autoKey = forgePresetKey(pick.model, true); const pk = staleLightning ? autoKey : forgePresetKey(pick.model); const P = FORGE_PRESETS[pk];
   /* Auto follows the checkpoint: Lightning and the 4-step LoRA builds paint in six steps, a standard SDXL
-     build gets the usual 25. A preset picked by hand in Settings still wins. */
-  const T = (s.forgePreset || 'auto') === 'auto' ? forgeTune(pick.model, P.base, s.speedLora) : { steps: P.steps, cfg: P.cfg, sampler: P.sampler, scheduler: P.scheduler, lora: '' };
+     build gets the usual 25. A preset picked by hand in Settings still wins, unless it is the stale
+     Lightning preset above. */
+  const useTune = (s.forgePreset || 'auto') === 'auto' || staleLightning;
+  const T = useTune ? forgeTune(pick.model, P.base, s.speedLora) : { steps: P.steps, cfg: P.cfg, sampler: P.sampler, scheduler: P.scheduler, lora: '' };
   const lora = T.lora, steps = T.steps, cfg = T.cfg;
   const [FW, FH] = FORGE_SIZES[P.base][s.size || 'portrait'] || FORGE_SIZES[P.base].square;
   /* "Fast" draws SDXL pictures at 3/4 size: about half the pixels, so roughly twice as quick on smaller cards */

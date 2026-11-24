@@ -126,10 +126,10 @@ function palWorn(ch, id) {
   return '';
 }
 /* where a subject's look is edited: the visual profile for the player and the party, their own card otherwise */
-const subjLookGet = (s, x) => s.t === 'pal' ? String(x.tags || '') : s.t === 'npc' ? String(x.look || '') : String(profOf(x).appearance ?? x.appearance ?? '');
+const subjLookGet = (s, x) => s.t === 'pal' ? String(x.tags || '') : s.t === 'npc' ? String(x.look || '') : String(profOf(x).appearance || x.appearance || '');
 function subjLookSet(s, x, v) {
   if (s.t === 'pal') { x.tags = v.slice(0, 600); x.look = palLook(x); return; }
-  if (s.t === 'npc') { x.look = v.slice(0, 400); return; }
+  if (s.t === 'npc') { x.look = v.slice(0, 400); x.appearance = x.look; return; }
   profSeed(x); profOf(x).appearance = v.slice(0, 500); profSync(x);
 }
 function subjSave(s) { if (s.t === 'pal') { const p = PALS.pals[s.id]; if (p) { palTouch(p); savePals(); } } else { const c = S.campaigns[s.g]; if (c) { touch(c); scheduleSync(); } } }
@@ -170,6 +170,28 @@ function lbModelHTML(img, model) {
   return html;
 }
 
+/* the saved look is the default prompt every picture starts from: let the AI write it from the card */
+async function picLookText(x, old) {
+  const extra = [x?.text, x?.role, x?.personality, x?.backstory, x?.where].map(s => String(s || '').trim()).filter(Boolean).join('\n');
+  const raw = await chat([
+    { role: 'system', content: 'You write the saved default look of ONE character for an image generator. Reply with 20-60 words of comma-separated visual phrases and nothing else: age, gender, face shape, eyes, hair, skin, build, distinguishing marks, and usual clothing. No name, no pose, no place, no camera or light directions, no personality, no story. Never sexualize a minor; keep the description age-appropriate.' },
+    { role: 'user', content: `NAME: ${String(x?.name || 'the character')}\n\nWHAT THE CARD KNOWS\n${profBrief(x).slice(0, 1200)}${extra ? `\n${extra.slice(0, 800)}` : ''}\n\nCURRENT DEFAULT LOOK\n${String(old || '').trim() || '(none yet)'}` }
+  ], { stream: false, maxTokens: 300, temperature: 0.65 });
+  const t = String(stripThink(raw || '')).trim().replace(/^["'`]|["'`]$/g, '').replace(/\.\s*/g, ', ').replace(/\s+/g, ' ').replace(/\s*,\s*,+/g, ',').replace(/^[,\s]+|[,\s]+$/g, '');
+  if (!t) throw new Error('nothing came back');
+  return t.slice(0, 600);
+}
+async function picLookAI(btn, s, x) {
+  if (!btn) return; const old = btn.innerHTML; btn.disabled = true; btn.innerHTML = '<span class="spin sm"></span>';
+  try {
+    const t = await picLookText(x, subjLookGet(s, x));
+    subjLookSet(s, x, t); subjSave(s);
+    const box = $('#lbLook'); if (box) box.value = subjLookGet(s, x);
+    toast(`Default picture prompt written for ${x.name || 'this character'}.`, 4000);
+  } catch (e) { toast('Could not write that look: ' + e.message, 5000); }
+  finally { btn.disabled = false; btn.innerHTML = old; }
+}
+
 function openLightbox(src, cap, ref) {
   closeLightbox(); if (!src) return;
   const img = ref && ref.t ? lbImage(ref) : null; const info = img || (ref && ref.prompt ? ref : null);
@@ -183,6 +205,7 @@ function openLightbox(src, cap, ref) {
   const model = img && ref && ref.t ? picModel(ref, img) : null;
   const editor = !(info && info.prompt != null && !info.data) ? '' : !img ? `<div class="lbprompt"><b>Prompt</b><p>${esc(info.prompt)}</p></div>`
     : who ? `<label class="f"><span>${esc(nm)}'s look: used in every picture of ${esc(nm)}</span><textarea id="lbLook" rows="3" placeholder="How ${esc(nm)} looks: age, hair, eyes, build, usual clothes">${esc(subjLookGet(subj, who))}</textarea></label>
+        <div class="row wrap" style="margin-top:-6px"><button class="btn sm ghost" data-lb="ailook">${icon('spark')} Write this default look with AI</button></div>
         ${subj.t === 'pal' ? `<p class="hint" style="margin-top:-4px">These are her locked picture tags. Her Face, Body and current outfit from her card are added too.</p>` : ''}
         ${refRow}
         <label class="f"><span>This picture only: pose, place, outfit, mood</span><textarea id="lbPose" rows="3" placeholder="e.g. sitting on a park bench, autumn afternoon, smiling, reading a book">${esc(img.pose || '')}</textarea></label>
@@ -207,6 +230,7 @@ function openLightbox(src, cap, ref) {
     if (!k || !S.lb?.ref) return;
     const r = S.lb.ref; const im = lbImage(r); if (!im) return closeLightbox();
     const sj = S.lb.subj; const ch0 = subjChar(sj);
+    if (k === 'ailook' && ch0) { picLookAI(b, sj, ch0); return; }
     if (k === 'aipose' && ch0) {
       let ctx = '';
       if (r.t === 'pal') { const pc = PALS.chats[r.chat]; ctx = [pc?.scene, ...arr(pc?.messages).filter(m => m.text).slice(-4).map(m => `${m.role === 'user' ? 'Them' : (PALS.pals[m.who]?.name || 'Her')}: ${m.text}`)].filter(Boolean).join('\n'); }
@@ -241,7 +265,10 @@ function openLightbox(src, cap, ref) {
     if (k === 'regen') { askPicNsfw(nsfw => {
       im.prompt = prompt; im.neg = neg; im.seed = d(999999); Object.assign(im, extra); if (nsfw) im.nsfw = true; else delete im.nsfw;
       if (useModel) im.model = useModel; else delete im.model;
-      if (!sj) { delete im.subj; delete im.pose; } lbSave(r); openLightbox(lbSrc(r), S.lb.cap, r); }, 'a new version', !!im.nsfw); return; }
+      if (!sj) { delete im.subj; delete im.pose; }
+      /* the prompt or seed changed: never reuse the old picture's forge key or message cache */
+      delete im.k; delete im.cache; delete im.hidden;
+      lbSave(r); openLightbox(lbSrc(r), S.lb.cap, r); }, 'a new version', !!im.nsfw); return; }
     if (k === 'more') { askPicNsfw(nsfw => {
       const nu = { prompt, neg, seed: d(999999), ...(im.kind ? { kind: im.kind } : {}), ...(im.user ? { user: im.user } : {}),           ...(nsfw ? { nsfw: true } : {}), ...(useModel ? { model: useModel } : {}), ...extra }; let nr = r;
       if (r.t === 'pal') { const ch = PALS.chats[r.chat]; const i = ch.messages.findIndex(m => m.id === r.msg); const src0 = ch.messages[i]; const nm2 = { id: uid(), role: 'pal', who: src0.who, text: '', mode: src0.mode, pic: 'more', image: nu, t: Date.now() }; ch.messages.splice(i + 1, 0, nm2); nr = { t: 'pal', chat: ch.id, msg: nm2.id }; }
@@ -304,8 +331,9 @@ window.palImgFail = el => { const ph = el.previousElementSibling; if (!ph) retur
 
 /* ---------- a photo inside a companion chat ---------- */
 function palPhotoHTML(ch, m, p) {
+  if (m.image?.hidden) return `<div class="palphotow ishidden"><div class="palhidebar"><span>Photo hidden</span><button class="link" data-act="palshowphoto" data-id="${m.id}">Show photo</button></div></div>`;
   const src = palImg(m.image, p, ch, m); if (!src) return '';
-  return `<div class="palphotow"><div class="ph"><span class="spin"></span><span class="imgprog">Painting…</span><button class="link" data-act="palpiccancel" data-id="${m.id}">Cancel</button></div><img class="palphoto" data-act="palzoom" data-id="${m.id}" alt="photo" src="${esc(src)}" onload="if(this.src.indexOf('data:image/svg')){this.classList.add('ld');this.previousElementSibling.style.display='none'}" onerror="palImgFail(this)"></div>`;
+  return `<div class="palphotow"><div class="ph"><span class="spin"></span><span class="imgprog">Painting…</span><button class="link" data-act="palpiccancel" data-id="${m.id}">Cancel</button></div><img class="palphoto" data-act="palzoom" data-id="${m.id}" alt="photo" src="${esc(src)}" onload="if(this.src.indexOf('data:image/svg')){this.classList.add('ld');this.previousElementSibling.style.display='none'}" onerror="palImgFail(this)"><button class="palhidebtn" data-act="palhidephoto" data-id="${m.id}">Hide photo</button></div>`;
 }
 /* ---------- the player, in their own words ---------- */
 /* you write "I", "me", "my" in a picture prompt, but an image model needs a person it can draw.
@@ -470,6 +498,8 @@ Reply with JSON only: {"prompt":"","outfit":"","intimate":false,"you_in_frame":f
     const ps2 = msg.image.subj && typeof subjChar === 'function' ? subjChar(msg.image.subj) : null;
     const pr = S.settings.image.refPhotos !== false && msg.image.subj && typeof subjRef === 'function' ? subjRef(msg.image.subj) : null;
     msg.image.k = localKeyFor(msg.image, pc, ps2, pr);
+    /* keep the bytes attached to this chat message even if the forge settings change later */
+    if (typeof palPicCacheKey === 'function') msg.image.cache = palPicCacheKey(ch, msg, msg.image);
   } catch (e) { console.warn('Picture key', e); }
   msg.text = selfie ? String(j?.caption || '').replace(/^["“]|["”]$/g, '').trim().slice(0, 300) || '*sends a selfie*' : '';
   if (o.saveNeg) ch.picNeg = neg;
@@ -510,6 +540,8 @@ function palPicAction(act, el) {
       if (!String(m.text || '').trim() || m.text === '*sends a selfie*') ch.messages = ch.messages.filter(x => x !== m);
       palTouch(ch); savePals(); palRedraw(); toast('Picture cancelled.'); return true; }
     case 'palpicretry': if (typeof LOCAL !== 'undefined') { LOCAL.fail = {}; LOCAL.failAt = {}; } palRedraw(); return true;
+    case 'palhidephoto': { const m = ch?.messages.find(x => x.id === el.dataset.id); if (m?.image && !m.image.hidden) { m.image.hidden = true; palTouch(ch); savePals(); palRedraw(); } return true; }
+    case 'palshowphoto': { const m = ch?.messages.find(x => x.id === el.dataset.id); if (m?.image?.hidden) { delete m.image.hidden; palTouch(ch); savePals(); palRedraw(); } return true; }
   }
   return false;
 }
@@ -531,7 +563,7 @@ function galleryGroups() {
   }
   for (const ch of palChats()) {
     const ps = palsOf(ch); if (!ps.length) continue; const items = [];
-    for (const m of arr(ch.messages)) if (m.image) { const p = PALS.pals[m.who] || ps[0]; const src = palImg(m.image, p, ch); if (src) items.push({ src, name: `${p.name}${m.image.kind === 'selfie' ? ' · selfie' : ''}`, fav: !!m.image.fav, img: m.image, nsfw: picAutoNsfw(m.image, palCtx(p, ch)), ref: { t: 'pal', chat: ch.id, msg: m.id } }); }
+    for (const m of arr(ch.messages)) if (m.image) { const p = PALS.pals[m.who] || ps[0]; const src = palImg(m.image, p, ch, m); if (src) items.push({ src, name: `${p.name}${m.image.kind === 'selfie' ? ' · selfie' : ''}`, fav: !!m.image.fav, img: m.image, nsfw: picAutoNsfw(m.image, palCtx(p, ch)), ref: { t: 'pal', chat: ch.id, msg: m.id } }); }
     if (items.length) groups.push({ key: 'chat_' + ch.id, title: ch.title || ps.map(p => p.name).join(', '), kind: ps.length > 1 ? 'Group chat' : 'Companion chat', items: items.reverse() });
   }
   const ports = allPals().filter(p => p.portrait).map(p => ({ src: palImg(p.portrait, p), name: p.name, fav: !!p.portrait.fav, img: p.portrait, nsfw: picAutoNsfw(p.portrait, palCtx(p, null)), ref: p.portrait.data ? null : { t: 'port', pal: p.id } })).filter(x => x.src);

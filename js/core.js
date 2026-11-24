@@ -197,7 +197,7 @@ const S = {
   invokeOpen:false, invokeSel:[], ruling:false, rollResult:null, rolling:false, lu:null
 };
 const cur = () => S.campaigns[S.activeId];
-function saveSettings(touchIt = true) { if (touchIt) S.settings.updatedAt = Date.now(); LS.set('iq.settings', S.settings); applyUI(); }
+function saveSettings(touchIt = true) { if (typeof normalizeForgePreset === 'function') normalizeForgePreset(false); if (touchIt) S.settings.updatedAt = Date.now(); LS.set('iq.settings', S.settings); applyUI(); }
 function saveCampaigns() { LS.set('iq.campaigns', S.campaigns); LS.set('iq.deleted', S.deleted); }
 function touch(c) { if (c.players && c.mode === 'mp') c.players[c.activeP || 0] = c.character; c.updatedAt = Date.now(); saveCampaigns(); }
 function applyUI() {

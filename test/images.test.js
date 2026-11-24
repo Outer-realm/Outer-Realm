@@ -23,8 +23,9 @@ const APP = [
   part('js/images.js', 'function forgeTune', 'function pickForgeModel('),
   part('js/images.js', 'const picCheckpoint =', 'function autoAssignModels'),
   part('js/images.js', 'function pickForgeModel(', '/* "Auto" reads the model'),
+  part('js/images.js', 'function forgePresetKey', 'const forgeUrl ='),
   part('js/images.js', 'const sameForgeModel =', 'const LOCAL ='),
-  ';globalThis.__img = { forgeTune, FORGE_SIZES, FORGE_PRESETS, SPEED_LORA, sameForgeModel, pickForgeModel };'
+  ';globalThis.__img = { forgeTune, FORGE_SIZES, FORGE_PRESETS, SPEED_LORA, sameForgeModel, pickForgeModel, forgePresetNeedsAuto, normalizeForgePreset };'
 ].join('\n');
 
 let pass = 0, fail = 0;
@@ -36,7 +37,7 @@ function is(name, ok, extra) {
 
 const ctx = vm.createContext({ console, S: { settings: { image: {} } }, AGE: { imageAllowed: () => ({ allowed: true }) }, normRating: r => r });
 vm.runInContext(APP, ctx, { filename: 'images.js' });
-const { forgeTune, FORGE_SIZES, FORGE_PRESETS, sameForgeModel, pickForgeModel } = ctx.__img;
+const { forgeTune, FORGE_SIZES, FORGE_PRESETS, sameForgeModel, pickForgeModel, forgePresetNeedsAuto, normalizeForgePreset } = ctx.__img;
 
 const REALVIS = 'RealVisXL_V5.0_Lightning_fp16.safetensors [fabcadd933]';
 const BIGLOVE = 'BigLovePhoto5.safetensors';
@@ -94,7 +95,16 @@ console.log('\n6. Safe and adult picture models');
   is('a protected/minor picture ignores the adult model', pick('M') === REALVIS, pick('M'));
 }
 
-console.log('\n7. One checkpoint, one reload decision');
+console.log('\n7. A stale Lightning preset follows the checkpoint');
+{
+  ctx.S.settings.image = { forgePreset: 'lightning', forgeCheckpoint: '', forgeModelSfw: PORNM };
+  is('a standard SDXL model makes Lightning stale', forgePresetNeedsAuto(PORNM) === true);
+  is('the persisted preset becomes Auto', normalizeForgePreset(false) === true && ctx.S.settings.image.forgePreset === 'auto');
+  ctx.S.settings.image = { forgePreset: 'lightning', forgeCheckpoint: '', forgeModelSfw: REALVIS };
+  is('a real Lightning model keeps Lightning', forgePresetNeedsAuto(REALVIS) === false);
+}
+
+console.log('\n8. One checkpoint, one reload decision');
 {
   is('a title with [hash] matches the name Forge reports', sameForgeModel('RealVisXL_V5.0_Lightning_fp16.safetensors [fabcadd933]', 'RealVisXL_V5.0_Lightning_fp16.safetensors'));
   is('a different checkpoint does not match', !sameForgeModel('BigLovePhoto5.safetensors', 'RealVisXL_V5.0_Lightning_fp16.safetensors'));

@@ -446,12 +446,13 @@ function getKeysHTML() {
   /* Pollinations text is paid since Nov 2026, so it's offered only under "Add manually". */
 }
 function importHTML() {
-  return `<textarea id="keyPaste" rows="3" placeholder="Paste one or more keys here — any format. The app figures out which is which."></textarea>
+  return `<textarea id="keyPaste" rows="3" placeholder="Paste one or more keys here — any format. The app figures out which is which (e.g. mistral = ...)."></textarea>
+    ${S.keyPasteHint ? `<div class="row wrap" style="margin-top:8px;align-items:center;gap:8px"><span class="hint" style="margin:0;flex:1">${esc(S.keyPasteHint)} Try <code>mistral = YOUR_KEY</code>.</span><button class="btn sm" data-act="keysmanual">Add manually</button></div>` : ''}
     <div class="row" style="margin-top:8px"><button class="btn gold sm" data-act="keypaste">${icon('plus')} Add pasted keys</button>
       ${!isPhone() ? `<button class="btn sm" data-act="findollama">${icon('spark')} Find Ollama</button>` : ''}
       <button class="btn sm" data-act="keyfile">${icon('upload')} Import keys file</button>
       <button class="btn sm ghost" data-act="keytemplate">${icon('download')} Blank key file</button></div>
-    <details style="margin-top:10px"><summary class="hint" style="cursor:pointer">More: export keys, Ollama, custom address</summary>
+    <details id="keyMore" style="margin-top:10px"><summary class="hint" style="cursor:pointer">Add manually, export keys, Ollama…</summary>
       <div class="row" style="margin-top:8px"><button class="btn sm" data-act="keyexport">${icon('download')} Export my keys</button>
         <button class="btn sm" data-act="keydrive" ${Drive.valid() ? '' : 'disabled'}>${icon('cloud')} Save keys to the vault</button></div>
       <p class="hint">Export saves a plain keys file for your other devices — keep it private and delete it afterwards. Save to the vault seals your keys with your passphrase and puts only the ciphertext in your Drive folder, so every device that connects unlocks them automatically.</p>

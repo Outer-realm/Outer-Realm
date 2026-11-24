@@ -112,7 +112,21 @@ document.addEventListener('click', e => {
     case 'galregen': { const g = arr(c.gallery).find(x => x.id === el.dataset.id); if (g) { const old = g.seed; g.seed = d(999999); for (const p of [c.character, ...arr(c.party)]) if (p.portrait && p.portrait.seed === old) p.portrait.seed = g.seed; touch(c); scheduleSync(); renderModal(); } break; }
     case 'talkto': c.talkTo = el.dataset.id; touch(c); renderDock(); break;
     case 'compedit': S.compEdit = S.compEdit === el.dataset.id ? null : el.dataset.id; renderModal(); break;
+    case 'compailook': { const p = arr(c?.party).find(x => x.id === el.dataset.id); if (!p) break; const sj = { t: 'party', g: c.id, id: p.id };
+      const old = el.innerHTML; el.disabled = true; el.innerHTML = '<span class="spin sm"></span>';
+      picLookText(p, subjLookGet(sj, p)).then(t => { subjLookSet(sj, p, t); touch(c); scheduleSync(); const box = document.querySelector(`[data-pedit="${p.id}"][data-k="appearance"]`); if (box) box.value = t; toast(`Default picture prompt written for ${p.name}.`, 4000); })
+        .catch(e => toast('Could not write that look: ' + e.message, 5000)).finally(() => { el.disabled = false; el.innerHTML = old; }); break; }
     case 'compeditdone': S.compEdit = null; touch(c); scheduleSync(); renderModal(); renderGame(); break;
+    case 'pcailook': { const p = c?.character; if (!p) break; const sj = { t: 'pc', g: c.id };
+      const old = el.innerHTML; el.disabled = true; el.innerHTML = '<span class="spin sm"></span>';
+      picLookText(p, subjLookGet(sj, p)).then(t => { subjLookSet(sj, p, t); touch(c); scheduleSync(); const box = document.querySelector('[data-cbind="character.profile.appearance"]'); if (box) box.value = t; toast(`Default picture prompt written for ${p.name}.`, 4000); })
+        .catch(e => toast('Could not write that look: ' + e.message, 5000)).finally(() => { el.disabled = false; el.innerHTML = old; }); break; }
+    case 'npcailook': { const g = k => ($('#np_' + k)?.value || '').trim(); const ed = S.npcEdit ? peopleOf(c).find(x => x.name === S.npcEdit) : null;
+      const draft = { ...(ed || {}), name: g('name') || ed?.name || '', text: g('text') || ed?.text || '', look: g('look') || ed?.look || '', where: g('where') || ed?.where || '' };
+      if (!draft.name) { toast('Give them a name first.'); break; }
+      const old = el.innerHTML; el.disabled = true; el.innerHTML = '<span class="spin sm"></span>';
+      picLookText(draft, draft.look).then(t => { const inp = $('#np_look'); if (inp) { inp.value = t; S.npcClearLook = false; } const hint = $('#np_look_hint'); if (hint) hint.textContent = 'Written by AI. Save this person to keep it.'; toast('Default picture prompt written. Save to keep it.', 4000); })
+        .catch(e => toast('Could not write that look: ' + e.message, 5000)).finally(() => { el.disabled = false; el.innerHTML = old; }); break; }
     case 'picstoggle': S.settings.image.scenes = S.settings.image.scenes === false; saveSettings(); renderModal(); toast(S.settings.image.scenes ? 'Scene pictures on.' : 'Scene pictures off. Tap Illustrate on any scene when you want one.', 3500); break;
     case 'galretry': LOCAL.fail = {}; LOCAL.failAt = {}; NET.checked = 0; renderModal(); toast(S.settings.image.mode === 'local' ? 'Trying again. Make sure Forge and the helper window are running on your PC.' : 'Trying again. The free picture service allows about one picture every 15 seconds.', 4500); break;
     case 'galdel': c.gallery = arr(c.gallery).filter(x => x.id !== el.dataset.id); touch(c); scheduleSync(); renderModal(); break;
@@ -169,6 +183,9 @@ document.addEventListener('click', e => {
     case 'noop': break;
     case 'findollama': detectOllama(); break;
     case 'keypaste': { const v = $('#keyPaste')?.value || ''; if (!v.trim()) { toast('Paste a key first.'); break; } importKeys(v); break; }
+    case 'keysmanual': { const raw = ($('#keyPaste')?.value || '').trim(); const more = $('#keyMore'); if (more) more.open = true;
+      const box = $('#manKey'); if (box && raw && !/\s/.test(raw) && raw.length >= 12) box.value = raw;
+      $('#manPreset')?.focus(); more?.scrollIntoView({ block: 'center' }); break; }
     case 'keyfile': $('#keysFile').click(); break;
     case 'keytemplate': download('ironquill-keys.txt', KEY_TEMPLATE, 'text/plain'); break;
     case 'keyexport': download(KEYS_FILE, keysFileContent()); toast('Keys file downloaded. Keep it private — it holds your keys.', 4500); break;
@@ -182,7 +199,7 @@ document.addEventListener('click', e => {
       if (PRESETS[p].key && !key) { toast('That provider needs a key.'); break; }
       if (p === 'custom' && !addr) { toast('Custom needs an address.'); break; }
       const c = newConn(p, key, addr ? { baseUrl: addr.replace(/\/+$/, '') } : {}); conns().push(c);
-      if (!S.settings.ai.active) S.settings.ai.active = c.id; saveSettings(); Vault.schedule(); refreshConnUI(); setupConn(c); break; }
+      if (!S.settings.ai.active) S.settings.ai.active = c.id; S.keyPasteHint = ''; saveSettings(); Vault.schedule(); refreshConnUI(); setupConn(c); break; }
     case 'connuse': S.settings.ai.active = el.dataset.id; saveSettings(); refreshConnUI(); toast('Now using ' + connName(activeConn())); break;
     case 'conndel': { const c0 = conns().find(x => x.id === el.dataset.id); if (!c0 || !confirm(`Remove ${c0.label} (${maskKey(c0.apiKey)}) from this device?`)) break;
       S.settings.ai.conns = conns().filter(x => x !== c0); if (S.settings.ai.active === c0.id) S.settings.ai.active = (conns().find(connReady) || conns()[0] || {}).id || ''; saveSettings(); Vault.schedule(); refreshConnUI(); break; }
@@ -265,6 +282,7 @@ document.addEventListener('input', e => {
     if (el.dataset.bind === 'image.forgeCheckpoint') {
       const old = S.settings.image.forgeModelSfw, nsfw = S.settings.image.forgeModelNsfw;
       S.settings.image.speedLora = /big.?love|pornmaster/i.test(v); S.settings.image.forgeModelSfw = v;
+      if (typeof forgePresetNeedsAuto === 'function' && forgePresetNeedsAuto(v)) S.settings.image.forgePreset = 'auto';
       /* an adult slot left following the old main model follows the new one; a deliberate different pick stays */
       if (!nsfw || nsfw === old) S.settings.image.forgeModelNsfw = '';
     }
@@ -344,6 +362,7 @@ document.addEventListener('visibilitychange', () => {
   if (!S.settings.image.v2) { S.settings.image.v2 = true; if (S.settings.image.size === 'landscape') S.settings.image.size = 'square'; if (S.settings.image.forgePreset === 'lightning') S.settings.image.forgePreset = 'auto'; LS.set('iq.settings', S.settings); }
   /* v3: SDXL-native portrait by default, at full size, instead of the old 850-square shape */
   if (!S.settings.image.v3) { S.settings.image.v3 = true; if (!S.settings.image.size || S.settings.image.size === 'square') S.settings.image.size = 'portrait'; if ((S.settings.image.forgeRes || 'fast') === 'fast') S.settings.image.forgeRes = 'full'; LS.set('iq.settings', S.settings); }
+  if (typeof normalizeForgePreset === 'function' && normalizeForgePreset(false)) LS.set('iq.settings', S.settings);
   applyUI();
   /* a saved settings file still pointing at the old built-in folder moves to the current one */
   if (folderIdFrom(S.settings.drive.folder) === LEGACY_DRIVE_FOLDER) { S.settings.drive.folder = DEFAULT_DRIVE_FOLDER; saveSettings(false); }

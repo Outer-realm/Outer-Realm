@@ -39,7 +39,7 @@ function sheetHTML() {
   const cf = (path, label, type = 'text') => `<label class="f"><span>${label}</span><input type="${type}" data-cbind="${path}" value="${esc(getPath(c, path) ?? '')}"></label>`;
   let body = '';
   if (isCompanion(c)) return ['', `<div style="text-align:center;margin:10px 0 4px">${S.settings.image.mode !== 'off' ? `<div class="sheetport">${ch.portrait ? `<img class="port xl" src="${esc(imageUrl(ch.portrait, c))}" alt="">` : `<div class="port xl ph2">${esc(ch.name[0] || '?')}</div>`}<button class="btn sm ghost" data-act="compportrait" data-id="main">${icon('image')} ${ch.portrait ? 'New portrait' : 'Paint portrait'}</button>${(() => { const per = myPersona(); return per?.portrait ? `<button class="btn sm ghost" data-act="pcpersonaport">Use ${esc(per.name)}'s photo</button>` : ''; })()}</div>` : ''}<div style="font-family:var(--display);font-size:30px;font-weight:700;color:var(--gold2)">${esc(ch.name)}</div></div>
-    ${cf('character.storyRole', 'Who you are here')}<label class="f"><span>Appearance</span><textarea rows="2" data-cbind="character.profile.appearance">${esc(String(profOf(ch).appearance ?? ch.appearance ?? ''))}</textarea></label><label class="f"><span>About you</span><textarea rows="5" data-cbind="character.backstory">${esc(ch.backstory || '')}</textarea></label>
+    ${cf('character.storyRole', 'Who you are here')}<label class="f"><span>Default picture prompt (the look every picture starts from)</span><textarea rows="2" data-cbind="character.profile.appearance">${esc(String(profOf(ch).appearance || ch.appearance || ''))}</textarea></label><div class="row wrap" style="margin-top:-6px"><button class="btn sm ghost" data-act="pcailook">${icon('spark')} Write this prompt with AI</button></div><label class="f"><span>About you</span><textarea rows="5" data-cbind="character.backstory">${esc(ch.backstory || '')}</textarea></label>
     <p class="hint">The narrator and cast know what's written here. Things they learn about you as you talk are kept in More → Story tools → Memory.</p>`];
   if (tab === 'sheet') {
     body = `<div style="text-align:center;margin:10px 0 4px">${S.settings.image.mode !== 'off' ? `<div class="sheetport">${ch.portrait ? `<img class="port xl" src="${esc(imageUrl(ch.portrait, c))}" alt="">` : `<div class="port xl ph2">${esc(ch.name[0] || '?')}</div>`}<button class="btn sm ghost" data-act="compportrait" data-id="main">${icon('image')} ${ch.portrait ? 'New portrait' : 'Paint portrait'}</button>${(() => { const per = myPersona(); return per?.portrait ? `<button class="btn sm ghost" data-act="pcpersonaport">Use ${esc(per.name)}'s photo</button>` : ''; })()}</div>` : ''}<div style="font-family:var(--display);font-size:30px;font-weight:700;color:var(--gold2)">${esc(ch.name)}</div>
@@ -74,6 +74,7 @@ function sheetHTML() {
       <div class="row wrap"><button class="btn sm" data-act="ivyopen" data-host="sheet">${icon('spark')} Interview me about this character</button></div>
       <div class="sect" style="font-size:18px">Physical appearance &amp; visual profile</div>
       ${profSectionHTML(ch, 'appearance', { bind: 'cbind', prefix: 'character.profile.', host: 'sheet' })}
+      <div class="row wrap" style="margin-top:-4px"><button class="btn sm ghost" data-act="pcailook">${icon('spark')} Write the default picture prompt with AI</button></div>
       <div class="sect" style="font-size:18px">Personality, likes, dislikes &amp; hobbies</div>
       ${profSectionHTML(ch, 'personality', { bind: 'cbind', prefix: 'character.profile.', host: 'sheet' })}
       <div class="sect" style="font-size:18px">Beliefs, values, motivations &amp; fears</div>
@@ -202,7 +203,11 @@ const KEY_PATTERNS = [
   ['openrouter', /sk-or-[A-Za-z0-9_-]{20,}/],
   ['gemini', /AIza[0-9A-Za-z_-]{30,}/],
   ['gemini', /\bAQ\.[0-9A-Za-z_-]{30,}/],
-  ['groq', /\bgsk_[A-Za-z0-9]{20,}/]
+  ['groq', /\bgsk_[A-Za-z0-9]{20,}/],
+  /* Mistral doesn't publish a prefix: a bare key is 32 letters/digits, and some
+     copies carry a mistral- prefix. Labeled pastes work either way. */
+  ['mistral', /\bmistral-[A-Za-z0-9_-]{20,}\b/],
+  ['mistral', /\b[A-Za-z0-9]{32}\b/]
 ];
 const LABEL_WORDS = [['openrouter', /open\s*router/i], ['gemini', /gemini|google\s*ai|ai\s*studio/i], ['mistral', /mistral/i], ['deepseek', /deep\s*seek/i], ['pollinations', /pollinations?/i], ['ollama', /ollama/i], ['groq', /groq/i], ['custom', /custom|lm\s*studio|kobold/i]];
 const CLIENT_ID_RE = /[0-9]{6,}-[a-z0-9]{10,}\.apps\.googleusercontent\.com/;
@@ -257,13 +262,19 @@ async function importKeys(text, { quiet } = {}) {
   if (p.folder && folderIdFrom(p.folder) && folderIdFrom(S.settings.drive.folder) !== folderIdFrom(p.folder)) { S.settings.drive.folder = p.folder; extras.push('Drive folder'); }
   if (!S.settings.ai.active || !conns().some(c => c.id === S.settings.ai.active)) S.settings.ai.active = (added[0] || conns()[0] || {}).id || '';
   saveSettings();
-  if (added.length || extras.length) Vault.schedule();   /* new keys reach the vault by themselves when one is set up */
+  if (added.length || extras.length) { S.keyPasteHint = ''; Vault.schedule(); }   /* new keys reach the vault by themselves when one is set up */
   if (!quiet) {
     const bits = [];
     if (added.length) bits.push(`Added ${added.map(c => c.label).join(', ')}`);
     if (extras.length) bits.push('saved ' + extras.join(', '));
     if (p.blocked.length) bits.push(`skipped ${[...new Set(p.blocked)].join(', ')} (blocks browser apps)`);
-    toast(bits.length ? bits.join(' · ') + '.' : 'No new keys found. Check the text, or add one manually.', 5500);
+    /* no recognised provider: keep the paste, explain the label form, and open manual entry */
+    const unmatched = String(text || '').trim() && !p.conns.length && !p.polliKey && !p.clientId && !p.folder && !p.blocked.length;
+    if (bits.length) { S.keyPasteHint = ''; toast(bits.join(' · ') + '.', 5500); }
+    else if (unmatched) {
+      S.keyPasteHint = 'No provider matched that key.';
+      toast('No provider matched that key. Label it, e.g. "mistral = …", or add it manually.', 7000);
+    } else { S.keyPasteHint = ''; toast('That key is already added.', 4500); }
   }
   rerender();
   for (const c of added) setupConn(c);

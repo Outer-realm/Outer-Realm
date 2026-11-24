@@ -57,6 +57,81 @@ function savePals(sync = true) {
   if (sync) scheduleSync();
 }
 const palTouch = x => { x.updatedAt = Date.now(); };
+
+/* ---------- survive a suspended tab ---------- */
+/* A reply is a browser request: when iOS/Android suspends the page, or the browser is reloaded, the
+   request is gone. Keep its partial text in localStorage so the chat can offer Resume instead of
+   losing the turn and starting a blank reply. This is deliberately local to the device: another
+   device must not resume a request it cannot see. */
+const PAL_PENDING_KEY = 'iq.palPending';
+/* This id is local to this browser/device, never synced. It keeps an interrupted reply from another
+   device from offering Resume here after Drive delivers its chat. */
+const PAL_DEVICE = (() => {
+  let d = LS.get('iq.palDevice', '');
+  if (!d) { d = 'dev-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10); LS.set('iq.palDevice', d); }
+  return d;
+})();
+let palPending = null, palPendingSavedAt = 0;
+function palPendingStart(ch, msg) {
+  palPending = { chat: ch.id, msg: msg.id, text: '', who: msg.who || '', mode: msg.mode || ch.channel || '', at: Date.now(), dev: PAL_DEVICE };
+  palPendingSavedAt = Date.now();
+  LS.set(PAL_PENDING_KEY, palPending);
+}
+function palPendingUpdate(ch, msg, text) {
+  if (!palPending || palPending.chat !== ch.id || palPending.msg !== msg.id) return;
+  palPending.text = String(text || '').slice(-8000);
+  if (Date.now() - palPendingSavedAt > 1200) { palPendingSavedAt = Date.now(); LS.set(PAL_PENDING_KEY, palPending); }
+}
+function palPendingClear(chatId, msgId) {
+  if (!palPending || (chatId && palPending.chat !== chatId) || (msgId && palPending.msg !== msgId)) return;
+  palPending = null; try { localStorage.removeItem(PAL_PENDING_KEY); } catch {}
+}
+function palPendingFlush() { if (palPending) LS.set(PAL_PENDING_KEY, palPending); }
+function palFindInterrupted() {
+  let best = null;
+  for (const ch of Object.values(PALS.chats)) for (const m of arr(ch.messages)) {
+    /* only a reply interrupted on this device may be rebuilt here; a synced one from the phone must not */
+    if (!m.interrupted || m.interruptedBy !== PAL_DEVICE) continue;
+    if (!best || (m.t || 0) >= (best.m.t || 0)) best = { ch, m };
+  }
+  return best;
+}
+function palPendingRestore() {
+  const p = LS.get(PAL_PENDING_KEY, null);
+  if (!p || !p.chat || !p.msg) {
+    /* older builds cleared the marker after restoring: rebuild it only from a bubble this device made */
+    const found = palFindInterrupted();
+    if (!found) return;
+    found.m.interruptedBy = PAL_DEVICE;
+    palPending = { chat: found.ch.id, msg: found.m.id, text: String(found.m.text || ''), who: found.m.who || '', mode: found.m.mode || found.ch.channel || '', at: found.m.t || Date.now(), dev: PAL_DEVICE };
+    LS.set(PAL_PENDING_KEY, palPending);
+    return;
+  }
+  /* an old marker without a device id is from this browser, so adopt it as local */
+  if (p.dev && p.dev !== PAL_DEVICE) { try { localStorage.removeItem(PAL_PENDING_KEY); } catch {} return; }
+  const ch = PALS.chats[p.chat];
+  if (!ch) { try { localStorage.removeItem(PAL_PENDING_KEY); } catch {} return; }
+  const msg = arr(ch.messages).find(m => m.id === p.msg);
+  /* a chat sync can bring a same-id bubble from another device; never adopt that one locally */
+  if (msg?.interruptedBy && msg.interruptedBy !== PAL_DEVICE) { try { localStorage.removeItem(PAL_PENDING_KEY); } catch {} return; }
+  const text = String(p.text || msg?.text || '').trim();
+  /* the reply finished before the tab died: there is nothing to resume */
+  if (msg && !msg.streaming && text && !msg.interrupted) { try { localStorage.removeItem(PAL_PENDING_KEY); } catch {} return; }
+  if (msg) {
+    delete msg.streaming;
+    if (text) { msg.text = text; msg.interrupted = true; msg.interruptedBy = PAL_DEVICE; }
+    else ch.messages = ch.messages.filter(m => m !== msg);
+  }
+  palPending = { chat: ch.id, msg: p.msg, text, who: p.who || msg?.who || '', mode: p.mode || ch.channel || '', at: p.at || Date.now(), dev: PAL_DEVICE };
+  ch.updatedAt = Date.now();
+  LS.set(PALS_KEY, PALS);
+  /* keep the marker: a reload before Resume must show Resume again */
+  LS.set(PAL_PENDING_KEY, palPending);
+}
+addEventListener('pagehide', palPendingFlush);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') palPendingFlush(); });
+palPendingRestore();
+
 const allPals = () => Object.values(PALS.pals).sort((a, b) => (b.lastChat || b.updatedAt || 0) - (a.lastChat || a.updatedAt || 0));
 const palChats = () => Object.values(PALS.chats).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
 const allPersonas = () => Object.values(PALS.personas).sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
@@ -143,6 +218,13 @@ function palCtx(p, chat) {
   return ctx;
 }
 const palPicLoading = new Set(), palPicMissing = new Set(), palPicChecked = new Set();
+/* A stable name for one chat photo, independent of the forge key. The forge key can change when a
+   model, style or reference setting changes; this keeps the bytes attached to the message that made them. */
+const palPicCacheKey = (chat, m, img) => {
+  if (!chat?.id || !m?.id || !img) return '';
+  if (img.cache) return img.cache;
+  return 'chatpic:' + chat.id + ':' + m.id + ':' + (img.k || 'legacy');
+};
 const palImg = (img, p, chat, m) => {
   if (!img) return '';
   if (img.data) return img.data;
@@ -155,16 +237,34 @@ const palImg = (img, p, chat, m) => {
   const ref = S.settings.image.refPhotos !== false && img.subj && typeof subjRef === 'function' ? subjRef(img.subj) : null;
   const k = localKeyFor(img, c, subject, ref);
   if (palPicMissing.has(k) || palPicChecked.has(k)) return imageUrl(img, c);
-  if (!palPicLoading.has(k)) { palPicLoading.add(k); palHydrate(img, c, k, p, m); }
+  if (!palPicLoading.has(k)) { palPicLoading.add(k); palHydrate(img, c, k, p, m, chat); }
   return localPH(k);
 };
-/* Before Forge paints, look for this exact picture in this device's store, in Drive under its hash, or
-   in the companion's folder under the name syncPals gives chat photos and portraits. */
-async function palHydrate(img, c, k, p, m) {
+/* Before Forge paints, look for this exact picture in its stable message cache, in this device's older
+   forge-key store, in Drive under its hash, or in the companion's folder under the name syncPals gives
+   chat photos and portraits. */
+async function palHydrate(img, c, k, p, m, chat) {
   try {
-    let b = await IDB.get(k) || await DriveImg.get(k);
+    const cache = palPicCacheKey(chat, m, img);
+    let b = cache ? await IDB.get(cache) : null;
+    if (!b) b = await IDB.get(k) || await DriveImg.get(k);
     if (!b && p?.id) b = await DriveImg.getCompanionFile(p.id, m?.id ? 'photo-' + m.id + '.jpg' : 'portrait.jpg');
-    if (b) { await IDB.put(k, b); palPicLoading.delete(k); palPicChecked.add(k); palRedraw(); return; }
+    if (b) {
+      /* keep a copy under the message's stable key, including pictures made before this cache existed.
+         Also keep the forge-key copy: imageUrl/pumpLocal still look there after this redraw. */
+      if (cache) {
+        await IDB.put(cache, b);
+        if (img.cache !== cache) { img.cache = cache; if (chat) { palTouch(chat); savePals(false); } }
+      }
+      if (k && k !== cache) await IDB.put(k, b);
+      /* have the redraw use the bytes immediately instead of waiting for pumpLocal to fetch them again */
+      try {
+        if (typeof LOCAL !== 'undefined' && LOCAL.url && !LOCAL.url[k] && typeof URL !== 'undefined' && typeof Blob !== 'undefined' && b instanceof Blob) {
+          LOCAL.url[k] = URL.createObjectURL(b);
+        }
+      } catch {}
+      palPicLoading.delete(k); palPicChecked.add(k); palRedraw(); return;
+    }
   } catch (e) { console.warn('Picture lookup', e); }
   palPicLoading.delete(k); palPicMissing.add(k); palRedraw();
 }
@@ -192,13 +292,18 @@ const picTried = new Set();
 /* a newly painted chat picture makes the next sync check the Photos folder again */
 window.palPicsChanged = id => { picTried.delete('phscan:' + id); };
 /* bytes of a painted chat picture: this device's store first, then Drive, with the painter's key */
-async function palChatBlob(img, p, chat) {
+async function palChatBlob(img, p, chat, m) {
   try {
     const s = S.settings.image;
     const subject = img?.subj && typeof subjChar === 'function' ? subjChar(img.subj) : null;
     const ref = s.refPhotos !== false && img?.subj && typeof subjRef === 'function' ? subjRef(img.subj) : null;
     const k = localKeyFor(img, palCtx(p, chat), subject, ref);
-    return (await IDB.get(k)) || (await DriveImg.get(k)) || null;
+    const cache = palPicCacheKey(chat, m, img);
+    let b = cache ? await IDB.get(cache) : null;
+    if (!b) b = await IDB.get(k) || await DriveImg.get(k);
+    if (!b && p?.id && m?.id) b = await DriveImg.getCompanionFile(p.id, 'photo-' + m.id + '.jpg');
+    if (b && cache) { await IDB.put(cache, b); img.cache = cache; }
+    return b || null;
   } catch (e) { console.warn('Chat picture', e); return null; }
 }
 /* the painted picture for a persona's photo, as bytes ready for the same upload path uploaded photos use */
@@ -356,7 +461,12 @@ async function syncPals(root) {
     /* a painted portrait may not be on this device: try once, not on every sync */
     const picMark = 'pal:' + p.id + ':' + stamp;
     const needsPortrait = !!p.portrait && !f?.appProperties?.iqPortrait && !picTried.has(picMark);
-    if (f && !needsData && !needsPortrait) continue;
+    /* Every chat picture gets a stable photo-<message>.jpg in this companion's Photos folder, even when the
+       card itself has not changed. That is what a device falls back to when its local hash key is missing. */
+    const pics = [];
+    for (const ch of chats) for (const m of arr(ch.messages)) if (m?.image && (!m.who || m.who === p.id)) pics.push([ch, m]);
+    const needsPhotos = !!pics.length && !picTried.has('phscan:' + p.id);
+    if (f && !needsData && !needsPortrait && !needsPhotos) continue;
     try {
       if (!f) f = { id: await Drive.createFolder(palFolderName(p), folder, { iqPal: p.id, iqUpdated: '0' }), appProperties: {} };
       let port = null;
@@ -367,11 +477,8 @@ async function syncPals(root) {
       if (!port && p.portrait && !f?.appProperties?.iqPortrait) picTried.add(picMark);
       if (needsData) await Drive.put(f.id, 'companion.json', await Sealed.file('companion.json', JSON.stringify({ app: APP, savedAt: Date.now(), pal: p, chats })), 'application/json');
       if (port) { const body = await Sealed.blobFor(port); await Drive.putFile(f.id, 'portrait.jpg', body, body.type || 'image/jpeg'); }
-      /* Every chat picture gets a stable photo-<message>.jpg in this companion's Photos folder, even when the
-         card itself has not changed. That is what a device falls back to when its local hash key is missing. */
-      const pics = [];
-      for (const ch of chats) for (const m of arr(ch.messages)) if (m?.image && (!m.who || m.who === p.id)) pics.push([ch, m]);
-      if (pics.length && !picTried.has('phscan:' + p.id)) {
+      let cacheChanged = false;
+      if (needsPhotos) {
         picTried.add('phscan:' + p.id);
         try {
           const photos = await Drive.folder(f.id, 'Photos');
@@ -380,12 +487,15 @@ async function syncPals(root) {
             const name = 'photo-' + String(m.id) + '.jpg';
             if (have.has(name)) continue;
             const owner = m.who ? PALS.pals[m.who] : p;
-            const photo = dataUrlBlob(m.image.data) || (m.image.prompt ? await palChatBlob(m.image, owner, ch) : null);
+            const before = m.image.cache;
+            const photo = dataUrlBlob(m.image.data) || (m.image.prompt ? await palChatBlob(m.image, owner, ch, m) : null);
+            if (m.image.cache !== before) cacheChanged = true;
             if (!photo) continue;
             const body = await Sealed.blobFor(photo); if (!body) continue;
             await Drive.putFile(photos, name, body, body.type || 'image/jpeg');
           }
         } catch (e) { console.warn('Companion photos', e); }
+        if (cacheChanged) savePals(false);
       }
       if (needsData || port) await Drive.patch(f.id, { name: palFolderName(p), appProperties: { iqPal: p.id, iqUpdated: String(stamp), ...(port ? { iqPortrait: '1' } : {}), ...(Sealed.ready() ? { iqSealed: '1' } : {}) } });
     } catch (e) { console.warn('Companion folder sync failed', e); }
@@ -544,11 +654,13 @@ function palOpenChat(id) {
   const ch = PALS.chats[id];
   /* no channel yet (a brand-new chat): choose texting or in person first */
   if (ch && !ch.channel) { S.palSetupChat = id; openModal('palchan'); return; }
-  S.palChat = id; S.view = 'palchat'; S.palEdit = null; S.palMenu = false; renderPalChat();
+  S.palChat = id; S.view = 'palchat'; S.palEdit = null; S.palMenu = false; S.palScrollBottom = true; renderPalChat();
 }
 const palTo = ch => { const ps = palsOf(ch); return ps.length < 2 ? ps[0] || null : ps.find(p => p.id === ch.to) || 'all'; };
 const first = n => String(n || '').trim().split(/\s+/)[0];
 function renderPalChat() {
+  const oldLog = $('#pallog'); const keepTop = oldLog && S.view === 'palchat' ? oldLog.scrollTop : null;
+  const wasBottom = oldLog ? oldLog.scrollHeight - oldLog.scrollTop - oldLog.clientHeight <= 8 : false;
   const ch = curChat(); if (!ch) { S.homeTab = 'pals'; return renderLibrary(); }
   const ps = palsOf(ch); const one = ps.length === 1 ? ps[0] : null; const to = palTo(ch); const person = ch.channel === 'person';
   const picsOn = S.settings.image.mode !== 'off'; const selfieOf = one || (to !== 'all' ? to : null);
@@ -570,7 +682,8 @@ function renderPalChat() {
       <div class="palin"><textarea id="palInput" rows="1" placeholder="${person ? '*Smile* and say something, or describe what you do…' : 'Message ' + esc(one ? one.name : to === 'all' ? 'everyone' : first(to.name)) + '…'}"></textarea>
       ${S.palBusy ? `<button class="btn" data-act="palstop">${icon('stop')}</button>` : `<button class="btn gold" data-act="palsend">${icon('send')}</button>`}</div>
     </div></div>`;
-  const log = $('#pallog'); if (log) log.scrollTop = log.scrollHeight;
+  const log = $('#pallog');
+  if (log) { if (keepTop != null && !S.palScrollBottom && !wasBottom) log.scrollTop = keepTop; else log.scrollTop = log.scrollHeight; S.palScrollBottom = false; }
   const inp = $('#palInput'); if (inp && !isPhone() && !S.modal) inp.focus();
 }
 function palMenuHTML(ch) {
@@ -635,9 +748,17 @@ function palLogHTML(ch) {
     html += one(m, m.text, m.role === 'user' ? null : palWho(ch, m), { now: m.id === lastId });
   }
   if (S.palBusy && S.palBusy.chat === ch.id && !msgs.some(m => m.streaming)) html += `<div class="pmsg txt them"><div class="brow"><div class="bub typing">${S.palBusy.looking ? `<span class="hint" style="margin:0">🔎 Looking up ${esc(S.palBusy.looking === '…' ? 'something' : S.palBusy.looking)}…</span>` : '<i></i><i></i><i></i>'}</div></div></div>`;
+  if (!S.palBusy && palPending && palPending.chat === ch.id) html += `<div class="palsys">The last reply was interrupted. <button class="link" data-act="palresume">Resume</button> <button class="link" data-act="palresumediscard">Discard</button></div>`;
   return html || `<p class="hint" style="text-align:center;margin-top:40px">Say hi.</p>`;
 }
-function paintPalLog() { const ch = curChat(); const log = $('#pallog'); if (!ch || !log || S.view !== 'palchat') return; const atEnd = log.scrollHeight - log.scrollTop - log.clientHeight < 120; log.innerHTML = palLogHTML(ch); if (atEnd) log.scrollTop = log.scrollHeight; }
+function paintPalLog() {
+  const ch = curChat(); const log = $('#pallog'); if (!ch || !log || S.view !== 'palchat') return;
+  /* only a reader sitting exactly at the bottom follows the reply. A few pixels up is already
+     reading position, and growing text must not pull the page away from it. */
+  const atEnd = log.scrollHeight - log.scrollTop - log.clientHeight <= 8; const top = log.scrollTop;
+  log.innerHTML = palLogHTML(ch);
+  if (atEnd) log.scrollTop = log.scrollHeight; else log.scrollTop = top;
+}
 
 /* ---------- memory: what each companion knows, and where she learned it ---------- */
 const memKey = t => String(t || '').toLowerCase().replace(/[^a-z0-9 ]/g, '').replace(/\s+/g, ' ').trim();
@@ -917,11 +1038,17 @@ async function palReply(ch, opts = {}) {
   const group = ps.length > 1; const to = opts.to || palTo(ch);
   const lead = (to && to !== 'all' ? to : null) || opts.who || ps[Math.floor(Math.random() * ps.length)];
   ch.messages = ch.messages.filter(m => !m.retry);
-  const msg = { id: uid(), role: 'pal', who: lead.id, text: '', mode: ch.channel || 'text', t: Date.now(), streaming: true };
-  ch.messages.push(msg);
+  /* Resume reuses the partial bubble: the model sees what it already wrote and continues it. */
+  const continuing = opts.continueMsg && ch.messages.includes(opts.continueMsg) ? opts.continueMsg : null;
+  const baseText = continuing ? String(continuing.text || '') : '';
+  const msg = continuing || { id: uid(), role: 'pal', who: lead.id, text: '', mode: ch.channel || 'text', t: Date.now() };
+  if (!continuing) ch.messages.push(msg);
+  msg.streaming = true;
   S.palBusy = { chat: ch.id, msg: msg.id };
   S.abort = new AbortController(); const signal = S.abort.signal;
   let replied = false;   /* a real reply landed, so a picture the player asked for can follow it */
+  let keepPending = false;   /* a partial reply survived an error: leave the Resume marker in place */
+  palPendingStart(ch, msg); palTouch(ch); savePals(false);
   palRedraw();
 
   const hist = [];
@@ -931,10 +1058,12 @@ async function palReply(ch, opts = {}) {
     else if (m.role === 'user') add('user', (group && m.to && m.to !== 'all' && PALS.pals[m.to] ? `(to ${PALS.pals[m.to].name}) ` : '') + m.text + (m.image ? ' ((sent a picture))' : ''));
     else add('assistant', (group ? `{${palWho(ch, m)?.name || ''}} ` : '') + m.text + (m.image ? ` *sends a photo*` : ''));
   }
+  if (baseText) add('assistant', baseText);
   if (opts.opener && !hist.length) add('user', `((Write the first message ${lead.name} sends to ${R0.n}, in ${lead.name}'s voice. Set the scene from ${lead.name}'s side of it: ${String(lead.scenario || 'saying hello for the first time').trim().replace(/[.!?]+$/, '')}. In that line "you" and "your" mean ${R0.n}, never you; it is their house, their day, their side of the situation. ${ch.channel === 'person' ? `Write only what ${lead.name} says and does.` : `Write only the text message ${lead.name} sends: words alone, with no narration, no actions and no quotation marks.`}))`);
   else if (opts.prompt) add('user', opts.prompt);
   /* a steer is the last thing the model reads, so it outranks the habit of reusing what it just wrote */
   else if (ch.steer) add('user', `((DIRECTION FROM THE PLAYER FOR THIS REPLY. Follow it exactly and stay in character; never mention being told:\n${ch.steer}\n))`);
+  else if (baseText) add('user', '((Continue this reply from exactly where it stops. Do not repeat anything already written; finish the thought naturally.))');
   else if (!hist.length || hist[hist.length - 1].role !== 'user') add('user', '((Continue.))');
 
   /* living memory: read the chat back while any lookup runs, so the reply starts with both */
@@ -964,8 +1093,9 @@ async function palReply(ch, opts = {}) {
   const sysMsg = { role: 'system', content: palSystem(ch, to) + (recall ? `\n\nMEMORY OF THIS CONVERSATION (your own recollection, read back from the messages: treat it as true, pick up what is still open, and never mention that it was written down):\n${recall}` : '') + (loreNote ? '\n\n' + loreNote : '') };
   /* texting replies get the roleplay stripped out of them; in-person replies keep actions */
   const cleanOut = t => { const d = palDedupeText(stripThink(t)); return ch.channel === 'person' ? d : (palTextOnly(d) || d); };
+  const joinPalText = (a, b) => { a = String(a || ''); b = String(b || ''); if (!a) return b; if (!b) return a; return /[\s\n]$/.test(a) ? a + b : a + ' ' + b; };
   const ask = (stream, extra) => chat([sysMsg, ...hist, ...(extra || [])],
-    { maxTokens: Math.round(PAL_LENGTHS[ch.length || 'normal'].tok * (group && to === 'all' ? 1.7 : 1)), temperature: 0.85, stream, signal, onToken: full => { msg.text = cleanOut(full); paintPalLog(); } });
+    { maxTokens: Math.round(PAL_LENGTHS[ch.length || 'normal'].tok * (group && to === 'all' ? 1.7 : 1)), temperature: 0.85, stream, signal, onToken: full => { const shown = baseText ? joinPalText(baseText, cleanOut(full)) : cleanOut(full); msg.text = shown; palPendingUpdate(ch, msg, shown); paintPalLog(); } });
   const live = !!S.settings.text.stream;   /* one setting covers story turns and companion replies */
   try {
     let out = '';
@@ -973,6 +1103,7 @@ async function palReply(ch, opts = {}) {
     try { out = cleanOut((await ask(live)).trim()); }
     finally { doneBump(); }
     if (!out) out = cleanOut(await ask(false));   /* some models send an empty first try */
+    if (continuing && out) out = joinPalText(baseText, out);
     /* it just said this: one more try, asked plainly, instead of showing the same reply again.
        A steered reply ("don't repeat") is measured against the last few lines, not only the one before. */
     const refs = [...ch.messages].reverse().filter(m => m.role === 'pal' && String(m.text || '').trim() && !m.streaming && m !== msg).slice(0, opts.noRepeat ? 4 : 1);
@@ -985,14 +1116,21 @@ async function palReply(ch, opts = {}) {
       if (again && near(again) < near(out)) out = again;
     }
     const i = ch.messages.indexOf(msg);
-    if (!out) { if (i >= 0) ch.messages.splice(i, 1); ch.messages.push({ id: uid(), role: 'sys', retry: true, text: 'No reply came back from the AI.', t: Date.now() }); }
+    if (!out) {
+      if (continuing) { delete msg.streaming; msg.interrupted = true; msg.interruptedBy = PAL_DEVICE; ch.messages.push({ id: uid(), role: 'sys', retry: true, text: 'The rest of the reply did not come through.', t: Date.now() }); }
+      else { if (i >= 0) ch.messages.splice(i, 1); ch.messages.push({ id: uid(), role: 'sys', retry: true, text: 'No reply came back from the AI.', t: Date.now() }); }
+    }
     else {
-      let parts = palParts(ch, out, lead.id);
-      if (group && to && to !== 'all') parts = parts.filter(x => x.who === to.id).length ? parts.filter(x => x.who === to.id) : [{ who: to.id, text: parts.map(x => x.text).join('\n\n') }];
-      if (!parts.length) parts = [{ who: lead.id, text: out }];
-      const made = parts.map((x, n) => ({ id: n ? uid() : msg.id, role: 'pal', who: x.who, text: x.text, mode: msg.mode, t: Date.now() + n, ...(parts.length > 1 || group ? { gid: msg.id } : {}) }));
-      if (!group) { made[0].alts = [...(opts.prevAlts || []), made[0].text]; made[0].altI = made[0].alts.length - 1; }
-      if (i >= 0) ch.messages.splice(i, 1, ...made); else ch.messages.push(...made);
+      let made;
+      if (continuing) { msg.text = out; delete msg.streaming; delete msg.interrupted; delete msg.interruptedBy; made = [msg]; }
+      else {
+        let parts = palParts(ch, out, lead.id);
+        if (group && to && to !== 'all') parts = parts.filter(x => x.who === to.id).length ? parts.filter(x => x.who === to.id) : [{ who: to.id, text: parts.map(x => x.text).join('\n\n') }];
+        if (!parts.length) parts = [{ who: lead.id, text: out }];
+        made = parts.map((x, n) => ({ id: n ? uid() : msg.id, role: 'pal', who: x.who, text: x.text, mode: msg.mode, t: Date.now() + n, ...(parts.length > 1 || group ? { gid: msg.id } : {}) }));
+        if (!group) { made[0].alts = [...(opts.prevAlts || []), made[0].text]; made[0].altI = made[0].alts.length - 1; }
+        if (i >= 0) ch.messages.splice(i, 1, ...made); else ch.messages.push(...made);
+      }
       const spoke = new Set(made.map(m => m.who));
       for (const p of ps) {
         if (!spoke.has(p.id)) continue;
@@ -1011,12 +1149,18 @@ async function palReply(ch, opts = {}) {
       if (ch.memTurns % 6 === 0) palUpdateMemory(ch);
     }
   } catch (e) {
-    const i = ch.messages.indexOf(msg);
-    if (i >= 0) { if (msg.text && e.name === 'AbortError') { delete msg.streaming; msg.text = palParts(ch, msg.text, lead.id).map(x => x.text).join('\n\n') || msg.text; } else ch.messages.splice(i, 1); }
-    if (e.name !== 'AbortError') { ch.messages.push({ id: uid(), role: 'sys', retry: true, text: 'The reply did not come through: ' + (e.message || e), t: Date.now() }); }
+    const i = ch.messages.indexOf(msg); const partial = String(msg.text || '').trim();
+    /* Keep whatever arrived, even when the request dies: a switch to another app or a lost connection
+       must leave a Resume button, not throw the half-written reply away. */
+    if (i >= 0 && partial) {
+      delete msg.streaming; msg.interrupted = true; msg.interruptedBy = PAL_DEVICE; keepPending = true;
+      if (!continuing) msg.text = palParts(ch, msg.text, lead.id).map(x => x.text).join('\n\n') || msg.text;
+    } else if (i >= 0) { delete msg.streaming; ch.messages.splice(i, 1); }
+    if (e.name !== 'AbortError' && !partial) { ch.messages.push({ id: uid(), role: 'sys', retry: true, text: 'The reply did not come through: ' + (e.message || e), t: Date.now() }); }
     savePals(false);
   } finally {
     delete msg.streaming;
+    if (!keepPending) palPendingClear(ch.id, msg.id);
     /* a steer is for one reply only: drop it whether it landed or not */
     if (ch.steer) { delete ch.steer; palTouch(ch); savePals(false); }
     if (S.palBusy?.msg === msg.id) S.palBusy = null;
@@ -1024,6 +1168,27 @@ async function palReply(ch, opts = {}) {
     palRedraw();
     if (replied && opts.after) { try { const r = opts.after(); if (r && r.catch) r.catch(e => console.warn('After-reply step failed', e)); } catch (e) { console.warn('After-reply step failed', e); } }
   }
+}
+/* pick up a reply the browser could not finish: continue the partial bubble, or retry if none arrived */
+function palResume(ch) {
+  if (!ch || S.palBusy || !palPending || palPending.chat !== ch.id) return;
+  const p = palPending;
+  const msg = ch.messages.find(m => m.id === p.msg);
+  const text = String(msg?.text || p.text || '').trim();
+  if (msg && !text) ch.messages = ch.messages.filter(m => m !== msg);
+  else if (msg) { msg.text = text; delete msg.streaming; }
+  /* keep msg.interrupted until the resumed reply actually lands: if setup is missing, another reload
+     must still offer Resume */
+  palTouch(ch); savePals(false); palRedraw();
+  /* palReply replaces the marker when it starts. If setup is missing and it returns early, the
+     existing marker stays, so Resume is still there after another reload. */
+  palReply(ch, msg && text ? { continueMsg: msg } : {});
+}
+function palDiscardPending(ch) {
+  if (!ch || !palPending || palPending.chat !== ch.id) return;
+  const msg = ch.messages.find(m => m.id === palPending.msg);
+  if (msg) ch.messages = ch.messages.filter(m => m !== msg);
+  palPendingClear(ch.id); palTouch(ch); savePals(); palRedraw();
 }
 /* redraw the chat without losing what you were halfway through typing */
 function palRedraw() {
@@ -1110,12 +1275,13 @@ function palSend() {
   const ch = curChat(); const inp = $('#palInput'); const txt = (inp?.value || '').trim();
   if (!ch || !txt) return;
   if (S.palBusy) return toast('Still writing the last reply. Tap ■ to stop it first.');
+  if (palPending && palPending.chat === ch.id) return toast('Resume or discard the interrupted reply first.');
   inp.value = ''; const to = palTo(ch);
   ch.messages = ch.messages.filter(m => !m.retry);
   ch.messages.push({ id: uid(), role: 'user', text: txt, mode: ch.channel || 'text', t: Date.now(), ...(palsOf(ch).length > 1 ? { to: to === 'all' ? 'all' : to.id } : {}) });
   /* asking for a picture in words: answer first, then send the picture */
   const pic = palPicAsk(txt);
-  palTouch(ch); savePals(); renderPalChat();
+  palTouch(ch); savePals(); S.palScrollBottom = true; renderPalChat();
   palReply(ch, pic ? { after: () => { if (curChat() === ch) return palPicture(ch, { ...pic, quiet: true, user: palPicWords(txt) }); } } : {});
 }
 
@@ -1189,6 +1355,7 @@ function palAction(act, el) {
     case 'palsceneset': if (ch) { ch.scene = ($('#palScene')?.value || '').trim(); ch.messages.push({ id: uid(), role: 'sys', text: ch.scene ? `Scene: ${ch.scene}` : 'Scene cleared', t: Date.now() }); palTouch(ch); savePals(); renderPalChat(); } return true;
     case 'palclear': if (ch && confirm('Clear all messages in this chat? What they remember stays.')) {
       if (S.palBusy?.chat === ch.id) S.abort?.abort();   /* a reply in flight must not land in the fresh chat */
+      if (palPending?.chat === ch.id) palPendingClear(ch.id);
       ch.messages = []; ch.summary = ''; palRecallForget(ch); palTouch(ch); savePals(); renderPalChat();
     } return true;
     case 'palrecallnow': if (ch) palRecallNow(ch); return true;
@@ -1197,6 +1364,8 @@ function palAction(act, el) {
     case 'palsend': palSend(); return true;
     case 'palstop': S.abort?.abort(); return true;   /* palReply's finally clears the busy state */
     case 'palretry': if (ch && !S.palBusy) { ch.messages = ch.messages.filter(m => !m.retry); palReply(ch); } return true;
+    case 'palresume': if (ch) palResume(ch); return true;
+    case 'palresumediscard': if (ch) palDiscardPending(ch); return true;
     case 'palquick': {
       if (!ch) return true; if (S.palBusy) { toast('Wait for the reply to finish first.'); return true; }
       const k = el.dataset.k;

@@ -126,8 +126,8 @@ function renderPalEditor() {
         <p class="hint">${!picsOn ? 'Turn on pictures in Settings → Images to make one here.' : !palLook(D) ? 'Describe the face or body first.' : 'This is the avatar. The button opens the prompt before painting: change what the picture shows, pick the model and tick NSFW, so you are not stuck with the default head-and-shoulders shot. An uploaded photo is also used as the reference photo. To keep a face the same in new pictures, open any picture of them you like and tap "Use this picture as the reference".'}</p>
         ${picsOn && palLook(D) && (!D.adult || AGE.isProtected(D)) ? `<p class="hint" style="color:var(--gold2)">${AGE.isProtected(D) ? 'This companion is protected, so every picture of them is safe and fully clothed.' : 'Adult content is off for this companion, so pictures use the safe model and come back clothed. Turn on "Allow adult content" in the Relationship step to paint the explicit ones.'}</p>` : ''}</div>
       <div class="grow">${t('face', 'Face', 'Face shape, eyes, hair, skin, expression, freckles or scars', 2)}${t('body', 'Body', 'Height, build, posture, tattoos, how they carry themselves', 2)}${t('clothing', 'Usual clothing', 'What they normally wear', 2)}</div></div>
-      ${t('tags', 'Locked picture tags (added to every picture so the look stays the same)', '1woman, 27 years old, long auburn hair, green eyes, freckles, athletic build', 2)}
-      <div class="row wrap"><button class="btn sm ghost" data-act="palbtags" ${busy ? 'disabled' : ''}>${icon('spark')} Suggest picture style tags</button></div>
+      ${t('tags', 'Default picture prompt (the look and tags added to every picture)', '1woman, 27 years old, long auburn hair, green eyes, freckles, athletic build', 2)}
+      <div class="row wrap"><button class="btn sm ghost" data-act="palbtags" ${busy ? 'disabled' : ''}>${icon('spark')} Suggest picture style tags</button><button class="btn sm ghost" data-act="palblookai" ${busy ? 'disabled' : ''}>${icon('spark')} Write the default look with AI</button></div>
       ${physHTML(D)}
       <div class="lbl">Saved outfits</div><p class="hint" style="margin-top:0">Whichever one is marked as worn is what the chats describe her in until you switch, here or from the chat menu. Pictures take what she has on from the chat or from the picture prompt, never from a saved outfit, so her body description stays the same while the clothes change.</p>
       <label class="chk"><input type="radio" name="palwear" data-act="palbwear" data-id="" ${!D.outfit ? 'checked' : ''}> <span>Usual clothing (above)</span></label>
@@ -273,6 +273,12 @@ function palBuildAction(act, el) {
     case 'palback': { if (!palLeaveOk()) return true; S.palDraft = null; S.palDraftAt = undefined; S.homeTab = 'pals'; renderLibrary(); return true; }
     case 'palbstep': { const i = num(el.dataset.i); if (i >= 0 && i < PAL_STEPS.length) { S.palStep = i; S.palStepAsk = ''; renderPalEditor(); $('.steps')?.scrollIntoView({ block: 'start' }); } return true; }
     case 'palvibe': { const v = el.dataset.v; if (!D || !v) return true; D.vibes = arr(D.vibes).includes(v) ? D.vibes.filter(x => x !== v) : [...arr(D.vibes), v].slice(0, 5); const y = scrollY; renderPalEditor(); scrollTo(0, y); return true; }
+    case 'palblookai': {
+      if (!D) return true; const btn = el; const old = btn.innerHTML; btn.disabled = true; btn.innerHTML = '<span class="spin sm"></span>';
+      picLookText(D, D.tags).then(t => { D.tags = t; D.look = palLook(D); toast('Default picture prompt written. Save the card to keep it.', 4000); const y = scrollY; renderPalEditor(); scrollTo(0, y); })
+        .catch(e => { toast('Could not write that look: ' + e.message, 5000); btn.disabled = false; btn.innerHTML = old; });
+      return true;
+    }
     /* the portrait's own prompt, model and NSFW flag: the default shot is clothed, so an explicit
        portrait is only possible when you can write the prompt and choose the adult model */
     case 'palbport': if (D && palLook(D)) {
